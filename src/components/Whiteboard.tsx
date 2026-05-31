@@ -147,7 +147,7 @@ export default function Whiteboard({
   };
 
   const startDraw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
+    if (e.cancelable) e.preventDefault();
     
     let clientX = 0;
     let clientY = 0;
@@ -178,7 +178,7 @@ export default function Whiteboard({
   };
 
   const draw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
+    if (e.cancelable) e.preventDefault();
 
     let clientX = 0;
     let clientY = 0;
@@ -252,13 +252,36 @@ export default function Whiteboard({
     prevPos.current = null;
   };
 
+  // Manually attach touch events with { passive: false } to avoid browser passive-by-default behavior
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const handleTouchStart = (e: TouchEvent) => {
+      startDraw(e as any);
+    };
+    const handleTouchMove = (e: TouchEvent) => {
+      draw(e as any);
+    };
+
+    canvas.addEventListener("touchstart", handleTouchStart, { passive: false });
+    canvas.addEventListener("touchmove", handleTouchMove, { passive: false });
+    canvas.addEventListener("touchend", stopDraw, { passive: false });
+
+    return () => {
+      canvas.removeEventListener("touchstart", handleTouchStart);
+      canvas.removeEventListener("touchmove", handleTouchMove);
+      canvas.removeEventListener("touchend", stopDraw);
+    };
+  }, [tool, isHost, color, lineWidth, zoom, panOffset, isPanning, panStart]);
+
   // Add Wheel zoom listener with non-passive options to prevent default background scrolls
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     const handleWheel = (e: WheelEvent) => {
-      e.preventDefault();
+      if (e.cancelable) e.preventDefault();
       const zoomFactor = 1.08;
       setZoom((prevZoom) => {
         let nextZoom = prevZoom;
@@ -583,9 +606,6 @@ export default function Whiteboard({
             onMouseMove={draw}
             onMouseUp={stopDraw}
             onMouseLeave={stopDraw}
-            onTouchStart={startDraw}
-            onTouchMove={draw}
-            onTouchEnd={stopDraw}
             className={`absolute inset-0 w-full h-full z-10 touch-none ${
               tool === "hand"
                 ? isPanning ? "cursor-grabbing" : "cursor-grab"
