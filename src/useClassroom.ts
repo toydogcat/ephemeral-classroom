@@ -239,6 +239,7 @@ export function useClassroom() {
     studentPcRef.current = pc;
 
     pc.ondatachannel = (event) => {
+      // 先賦值再執行 setup，確保 setup 內的 sendToPeer 找得到 dc
       studentDcRef.current = event.channel;
       setupDataChannel(event.channel, teacherId);
     };
@@ -264,8 +265,10 @@ export function useClassroom() {
     dc.onopen = () => {
       console.log(`[P2P] DataChannel Opened with ${peerId}`);
       if (myRole === 'student') {
-        // Student requests current full state from teacher once channel is ready
-        sendToPeer(peerId, { type: 'request_init_state' });
+        // 延遲 500ms 確保通道狀態在雙方都完全 Stable
+        setTimeout(() => {
+          sendToPeer(peerId, { type: 'request_init_state' });
+        }, 500);
       }
     };
 
@@ -306,7 +309,10 @@ export function useClassroom() {
       } else if (data.type === 'whiteboard_update') {
         setRoomState(prev => ({ ...prev, ...data.payload }));
       } else if (data.type === 'draw') {
-        setRoomState(prev => ({ ...prev, whiteboardPaths: [...prev.whiteboardPaths, data.payload].slice(-5000) }));
+        setRoomState(prev => {
+          const batch = Array.isArray(data.payload) ? data.payload : [data.payload];
+          return { ...prev, whiteboardPaths: [...prev.whiteboardPaths, ...batch].slice(-5000) };
+        });
       }
     };
   };
