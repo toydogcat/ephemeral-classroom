@@ -25,6 +25,7 @@ export function useClassroom() {
   });
 
   const mqttClientRef = useRef<MqttClient | null>(null);
+  const roomIdRef = useRef('');
   const myIdRef = useRef(Math.random().toString(36).substring(2, 9));
   const myStreamRef = useRef<MediaStream | null>(null);
   const teacherPcsRef = useRef<{ [studentId: string]: RTCPeerConnection }>({});
@@ -64,6 +65,7 @@ export function useClassroom() {
     setMyRole(role);
     setMyNickname(nickname);
     setRoomId(rid);
+    roomIdRef.current = rid; // 重要：立即同步更新 Ref
 
     const client = mqtt.connect(BROKER_URL);
     mqttClientRef.current = client;
@@ -82,7 +84,6 @@ export function useClassroom() {
         setIsConnecting(false);
         setRoomState(prev => ({ ...prev, roomId: rid, hostSocketId: myIdRef.current }));
       } else {
-        // Student subscribes first
         client.subscribe([
           `${baseTopic}/lobby_sync`,
           `${baseTopic}/signal/${myIdRef.current}`,
@@ -93,13 +94,12 @@ export function useClassroom() {
         ], (err) => {
           if (!err) {
             console.log(`[MQTT] Student subscriptions active. Sending join request...`);
-            // Small delay to ensure subscriptions are processed by broker
             setTimeout(() => {
               publish(`${baseTopic}/join`, { id: myIdRef.current, name: nickname });
             }, 500);
           } else {
             console.error(`[MQTT] Subscription error:`, err);
-            setErrorMsg("MQTT 訂閱失敗，請刷新重試。");
+            setErrorMsg("MQTT 訂閱失敗");
             setIsConnecting(false);
           }
         });
@@ -109,15 +109,15 @@ export function useClassroom() {
     client.on('message', (topic, message) => {
       const data = JSON.parse(message.toString());
       const baseTopic = `ephemeral-classroom/${rid}`;
-      console.log(`[MQTT] Message received on ${topic}:`, data);
+      console.log(`[MQTT] Incoming topic: ${topic}`);
 
       if (topic === `${baseTopic}/join` && role === 'teacher') {
         handleStudentJoin(data.id, data.name);
       } else if (topic === `${baseTopic}/signal/${myIdRef.current}`) {
         handleSignal(data.from, data.signal);
       } else if (topic === `${baseTopic}/lobby_sync` && role === 'student') {
-        console.log(`[MQTT] Received lobby sync. Joining room...`);
-        setRoomState(prev => ({ ...prev, ...data }));
+        console.log(`[MQTT] Received lobby sync. Entering classroom.`);
+        setRoomState(data);
         setInRoom(true);
         setIsConnecting(false);
       } else if (topic === `${baseTopic}/whiteboard`) {
@@ -130,16 +130,12 @@ export function useClassroom() {
         handleTeacherControl(data);
       }
     });
-
-    client.on('error', (err) => {
-      console.error(`[MQTT] Client error:`, err);
-      setErrorMsg("MQTT 連線錯誤，請確認網路或更換瀏覽器。");
-      setIsConnecting(false);
-    });
   };
 
   const handleStudentJoin = async (studentId: string, studentName: string) => {
-    console.log(`[Teacher] Handling join request from ${studentName} (${studentId})`);
+    const rid = roomIdRef.current;
+    console.log(`[Teacher] Student ${studentName} joining room ${rid}`);
+    
     const pc = new RTCPeerConnection(STUN_SERVERS);
     teacherPcsRef.current[studentId] = pc;
 
@@ -149,7 +145,7 @@ export function useClassroom() {
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
-        publish(`ephemeral-classroom/${roomId}/signal/${studentId}`, {
+        publish(`ephemeral-classroom/${rid}/signal/${studentId}`, {
           from: myIdRef.current,
           signal: { type: 'candidate', candidate: event.candidate }
         });
@@ -157,7 +153,6 @@ export function useClassroom() {
     };
 
     pc.ontrack = (event) => {
-      console.log(`[Teacher] Received track from student ${studentId}`);
       let audioEl = document.getElementById(`student-audio-${studentId}`) as HTMLAudioElement;
       if (!audioEl) {
         audioEl = document.createElement("audio");
@@ -171,7 +166,7 @@ export function useClassroom() {
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    publish(`ephemeral-classroom/${roomId}/signal/${studentId}`, {
+    publish(`ephemeral-classroom/${rid}/signal/${studentId}`, {
       from: myIdRef.current,
       signal: { type: 'offer', sdp: offer }
     });
@@ -184,20 +179,19 @@ export function useClassroom() {
           [studentId]: { id: studentId, name: studentName, isMuted: prev.isAllMuted, isHandUp: false, canSpeak: !prev.isAllMuted }
         }
       };
-      console.log(`[Teacher] Broadcasting updated lobby state...`);
-      publish(`ephemeral-classroom/${roomId}/lobby_sync`, newState);
+      publish(`ephemeral-classroom/${rid}/lobby_sync`, newState);
       return newState;
     });
   };
 
   const handleSignal = async (from: string, signal: any) => {
-    console.log(`[WebRTC] Received signal from ${from}:`, signal.type);
+    const rid = roomIdRef.current;
     const pc = myRole === 'teacher' ? teacherPcsRef.current[from] : (studentPcRef.current || createStudentPC(from));
     if (signal.type === 'offer') {
       await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      publish(`ephemeral-classroom/${roomId}/signal/${from}`, { from: myIdRef.current, signal: { type: 'answer', sdp: answer } });
+      publish(`ephemeral-classroom/${rid}/signal/${from}`, { from: myIdRef.current, signal: { type: 'answer', sdp: answer } });
     } else if (signal.type === 'answer') {
       await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
     } else if (signal.type === 'candidate') {
@@ -206,7 +200,7 @@ export function useClassroom() {
   };
 
   const createStudentPC = (teacherId: string) => {
-    console.log(`[Student] Creating PeerConnection to teacher ${teacherId}`);
+    const rid = roomIdRef.current;
     const pc = new RTCPeerConnection(STUN_SERVERS);
     studentPcRef.current = pc;
     if (myStreamRef.current) {
@@ -214,11 +208,10 @@ export function useClassroom() {
     }
     pc.onicecandidate = (event) => {
       if (event.candidate) {
-        publish(`ephemeral-classroom/${roomId}/signal/${teacherId}`, { from: myIdRef.current, signal: { type: 'candidate', candidate: event.candidate } });
+        publish(`ephemeral-classroom/${rid}/signal/${teacherId}`, { from: myIdRef.current, signal: { type: 'candidate', candidate: event.candidate } });
       }
     };
     pc.ontrack = (event) => {
-      console.log(`[Student] Received teacher audio stream`);
       const remoteAudio = document.getElementById("classroom-teacher-voice") as HTMLAudioElement;
       if (remoteAudio) remoteAudio.srcObject = event.streams[0];
     };
@@ -247,27 +240,27 @@ export function useClassroom() {
 
   const sendChatMessage = (content: string, type: 'text' | 'file' = 'text', fileData?: any) => {
     const msg: ChatMessage = { id: Math.random().toString(36).substring(2, 9), senderId: myIdRef.current, senderName: myNickname, role: myRole, content, timestamp: Date.now(), type, fileData };
-    publish(`ephemeral-classroom/${roomId}/chat`, msg);
+    publish(`ephemeral-classroom/${roomIdRef.current}/chat`, msg);
   };
 
   const toggleMuteAll = (mute: boolean) => {
     if (myRole !== 'teacher') return;
-    publish(`ephemeral-classroom/${roomId}/control/all`, { type: 'mute-all', mute });
+    publish(`ephemeral-classroom/${roomIdRef.current}/control/all`, { type: 'mute-all', mute });
   };
 
   const toggleHandUp = (isHandUp: boolean) => {
     if (myRole !== 'student') return;
-    publish(`ephemeral-classroom/${roomId}/control/teacher`, { type: 'hand-up', studentId: myIdRef.current, isHandUp });
+    publish(`ephemeral-classroom/${roomIdRef.current}/control/teacher`, { type: 'hand-up', studentId: myIdRef.current, isHandUp });
   };
 
   const allowSpeak = (studentId: string, canSpeak: boolean) => {
     if (myRole !== 'teacher') return;
-    publish(`ephemeral-classroom/${roomId}/control/all`, { type: 'speak-status', studentId, canSpeak, isHandUp: false });
+    publish(`ephemeral-classroom/${roomIdRef.current}/control/all`, { type: 'speak-status', studentId, canSpeak, isHandUp: false });
   };
 
   const updateWhiteboard = (data: any) => {
     if (myRole !== 'teacher') return;
-    publish(`ephemeral-classroom/${roomId}/whiteboard`, data);
+    publish(`ephemeral-classroom/${roomIdRef.current}/whiteboard`, data);
   };
 
   const disconnect = () => {
