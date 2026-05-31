@@ -163,14 +163,18 @@ export function useClassroom() {
       } else if (topic === `${baseTopic}/signal/${myIdRef.current}`) {
         handleSignal(data.from, data.signal);
       } else if (topic === `${baseTopic}/lobby_sync` && role === 'student') {
-        // 核心修正：避免 MQTT 廣播覆蓋掉已經由 P2P 同步好的白板資料
         setRoomState(prev => ({
           ...prev,
           roomId: data.roomId,
           hostSocketId: data.hostSocketId,
           isAllMuted: data.isAllMuted,
-          students: data.students,
-          // chatHistory: data.chatHistory // 聊天紀錄通常走單獨主題，但如果是 lobby_sync 帶來的也一併更新
+          students: data.students || {},
+          // 保留本地已經由 P2P 同步過來的白板資料，防止被 MQTT 的空頁面洗掉
+          whiteboardBackgrounds: prev.whiteboardBackgrounds.length > 1 || prev.whiteboardBackgrounds[0] !== '' 
+            ? prev.whiteboardBackgrounds 
+            : data.whiteboardBackgrounds || [''],
+          whiteboardPageNum: prev.whiteboardPageNum !== 0 ? prev.whiteboardPageNum : (data.whiteboardPageNum || 0),
+          whiteboardPaths: prev.whiteboardPaths.length > 0 ? prev.whiteboardPaths : (data.whiteboardPaths || [])
         }));
         setInRoom(true);
         setIsConnecting(false);
@@ -375,7 +379,12 @@ export function useClassroom() {
         });
       } else if (data.type === 'whiteboard_update') {
         console.log("[P2P] Received whiteboard_update", data.payload);
-        setRoomState(prev => ({ ...prev, ...data.payload }));
+        setRoomState(prev => ({
+          ...prev,
+          whiteboardBackgrounds: data.payload.whiteboardBackgrounds || [''],
+          whiteboardPageNum: data.payload.whiteboardPageNum ?? 0,
+          whiteboardPaths: data.payload.whiteboardPaths || []
+        }));
       } else if (data.type === 'draw') {
         setRoomState(prev => {
           const batch = Array.isArray(data.payload) ? data.payload : [data.payload];
