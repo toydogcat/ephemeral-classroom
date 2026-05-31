@@ -163,7 +163,15 @@ export function useClassroom() {
       } else if (topic === `${baseTopic}/signal/${myIdRef.current}`) {
         handleSignal(data.from, data.signal);
       } else if (topic === `${baseTopic}/lobby_sync` && role === 'student') {
-        setRoomState(data);
+        // 核心修正：避免 MQTT 廣播覆蓋掉已經由 P2P 同步好的白板資料
+        setRoomState(prev => ({
+          ...prev,
+          roomId: data.roomId,
+          hostSocketId: data.hostSocketId,
+          isAllMuted: data.isAllMuted,
+          students: data.students,
+          // chatHistory: data.chatHistory // 聊天紀錄通常走單獨主題，但如果是 lobby_sync 帶來的也一併更新
+        }));
         setInRoom(true);
         setIsConnecting(false);
       } else if (topic === `${baseTopic}/chat`) {
@@ -300,13 +308,24 @@ export function useClassroom() {
 
   const setupDataChannel = (dc: RTCDataChannel, peerId: string) => {
     dc.onopen = () => {
-      console.log(`[P2P] DataChannel Opened with ${peerId}`);
+      console.log(`[P2P] DataChannel with ${peerId} is now OPEN`);
       if (myRole === 'student') {
-        // 延遲 500ms 確保通道狀態在雙方都完全 Stable
+        // 確保通道穩定後才發送
         setTimeout(() => {
-          sendToPeer(peerId, { type: 'request_init_state' });
-        }, 500);
+          if (dc.readyState === 'open') {
+            console.log(`[P2P] Sending request_init_state to ${peerId}`);
+            sendToPeer(peerId, { type: 'request_init_state' });
+          }
+        }, 800);
       }
+    };
+
+    dc.onclose = () => {
+      console.warn(`[P2P] DataChannel with ${peerId} CLOSED`);
+    };
+
+    dc.onerror = (err) => {
+      console.error(`[P2P] DataChannel ERROR with ${peerId}:`, err);
     };
 
     dc.onmessage = (event) => {
