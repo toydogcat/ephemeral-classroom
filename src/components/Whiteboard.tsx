@@ -472,6 +472,8 @@ export default function Whiteboard({
     { name: "醒目黃", code: "#eab308" }
   ];
 
+  const currentBg = backgrounds[pageNum] || "";
+
   // Combined snapshot download (Background + Canvas paths)
   const downloadSnapshot = () => {
     const canvas = canvasRef.current;
