@@ -320,7 +320,7 @@ export function useClassroom() {
           sendToPeer(peerId, syncData);
           return current;
         });
-      if (data.type === 'whiteboard_update') {
+      } else if (data.type === 'whiteboard_update') {
         console.log("[P2P] Received whiteboard_update", data.payload);
         setRoomState(prev => ({ ...prev, ...data.payload }));
       } else if (data.type === 'draw') {
