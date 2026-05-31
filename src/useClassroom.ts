@@ -222,6 +222,15 @@ export function useClassroom() {
         if (videoTrack) {
           console.log(`[WebRTC] Successfully captured whiteboard canvas track for student ${studentId}`);
           pc.addTrack(videoTrack, canvasStream);
+
+          // 🔥 關鍵修正：強迫 Canvas 進行一次微小的重繪，激活 captureStream 的首幀發送
+          const ctx = canvasElement.getContext('2d');
+          if (ctx) {
+            // 稍微點一個看不見的透明點，或者重繪目前畫布，逼 Canvas 核心發送畫面
+            ctx.fillStyle = "rgba(0,0,0,0.01)";
+            ctx.fillRect(0, 0, 1, 1);
+            console.log("[WebRTC] Triggered canvas repaint heartbeat for WebRTC track activation.");
+          }
         }
       } catch (e) {
         console.error("[WebRTC] Failed to capture canvas stream:", e);

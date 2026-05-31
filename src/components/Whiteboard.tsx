@@ -632,9 +632,17 @@ export default function Whiteboard({
               id="classroom-student-video-whiteboard" // 🔵 對應前面 ontrack 綁定的 ID
               autoPlay
               playsInline
+              muted // 🔥 關鍵：強制靜音白板視訊軌，解除瀏覽器的自動播放安全限制
               controls={false} // 關閉播放器原生控制列
               className="w-full h-full object-contain bg-slate-900 pointer-events-none"
               style={{ minWidth: '100%', minHeight: '100%' }}
+              onLoadedMetadata={(e) => {
+                // 🔥 關鍵：當媒體後設資料載入成功，強制呼叫 play() 避免影片卡在第一幀全黑
+                const videoEl = e.currentTarget;
+                videoEl.play().catch(err => {
+                  console.warn("[WebRTC Video] Autoplay blocked, waiting for user interaction:", err);
+                });
+              }}
             />
           )}
         </div>
