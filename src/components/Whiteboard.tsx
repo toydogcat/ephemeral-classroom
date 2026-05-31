@@ -472,7 +472,47 @@ export default function Whiteboard({
     { name: "醒目黃", code: "#eab308" }
   ];
 
-  const currentBg = backgrounds[pageNum] || "";
+  // Combined snapshot download (Background + Canvas paths)
+  const downloadSnapshot = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    // Create a temporary canvas to merge background and drawings
+    const mergeCanvas = document.createElement("canvas");
+    mergeCanvas.width = LOGICAL_WIDTH;
+    mergeCanvas.height = LOGICAL_HEIGHT;
+    const mctx = mergeCanvas.getContext("2d");
+    if (!mctx) return;
+
+    const proceed = () => {
+      // 2. Draw the drawing canvas on top
+      mctx.drawImage(canvas, 0, 0);
+
+      // 3. Trigger download
+      const link = document.createElement("a");
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
+      link.download = `VibeClassroom_Snapshot_${timestamp}.png`;
+      link.href = mergeCanvas.toDataURL("image/png");
+      link.click();
+    };
+
+    // 1. Draw background first if exists
+    if (currentBg) {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        mctx.fillStyle = "#ffffff";
+        mctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+        mctx.drawImage(img, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+        proceed();
+      };
+      img.src = currentBg;
+    } else {
+      mctx.fillStyle = "#ffffff";
+      mctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+      proceed();
+    }
+  };
 
   return (
     <div className="flex flex-col gap-4 w-full h-full text-slate-100">
@@ -565,6 +605,20 @@ export default function Whiteboard({
           <span className="text-[10px] font-mono font-bold text-slate-400 px-1 min-w-[36px] text-center">
             {Math.round(zoom * 100)}%
           </span>
+
+          <div className="h-4 w-px bg-slate-800" />
+
+          {/* Download Snapshot Button */}
+          <button
+            onClick={downloadSnapshot}
+            className="p-2 text-emerald-400 hover:bg-slate-800 rounded transition-all cursor-pointer flex items-center justify-center"
+            title="下載當前講義截圖"
+          >
+            <Sparkles size={13} className="mr-1" />
+            <span className="text-[9px] font-bold">SNAPSHOT</span>
+          </button>
+
+          <div className="h-4 w-px bg-slate-800" />
 
           {/* Zoom In */}
           <button

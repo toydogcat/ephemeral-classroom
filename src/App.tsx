@@ -144,16 +144,24 @@ export default function App() {
   };
 
   const handleWhiteboardDraw = (data: any) => {
-    updateWhiteboard({ ...roomState, whiteboardPaths: [...roomState.whiteboardPaths, data] });
+    if (myRole !== "teacher") return;
+    broadcastDraw(data);
   };
 
   const handleWhiteboardClear = () => {
+    if (myRole !== "teacher") return;
     updateWhiteboard({ ...roomState, whiteboardPaths: [] });
   };
 
   const handleWhiteboardPageChange = (pageNum: number, backgrounds?: string[]) => {
+    if (myRole !== "teacher") return;
     const nextBgs = backgrounds || roomState.whiteboardBackgrounds;
-    updateWhiteboard({ ...roomState, whiteboardPageNum: pageNum, whiteboardBackgrounds: nextBgs, whiteboardPaths: [] });
+    updateWhiteboard({ 
+      ...roomState, 
+      whiteboardPageNum: pageNum, 
+      whiteboardBackgrounds: nextBgs, 
+      whiteboardPaths: [] 
+    });
   };
 
   const handleDownloadAttendance = () => {

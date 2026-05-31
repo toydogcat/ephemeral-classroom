@@ -28,15 +28,30 @@ export function useClassroom() {
   const roomIdRef = useRef('');
   const myIdRef = useRef(Math.random().toString(36).substring(2, 9));
   const myStreamRef = useRef<MediaStream | null>(null);
+  
+  // WebRTC Refs
   const teacherPcsRef = useRef<{ [studentId: string]: RTCPeerConnection }>({});
   const studentPcRef = useRef<RTCPeerConnection | null>(null);
+  const teacherDcsRef = useRef<{ [studentId: string]: RTCDataChannel }>({});
+  const studentDcRef = useRef<RTCDataChannel | null>(null);
   
-  // Buffers for ICE candidates arriving before remote description
   const iceBuffersRef = useRef<{ [peerId: string]: RTCIceCandidateInit[] }>({});
 
   const publish = (topic: string, message: any) => {
     if (mqttClientRef.current) {
       mqttClientRef.current.publish(topic, JSON.stringify(message));
+    }
+  };
+
+  // P2P Data Broadcast
+  const broadcastP2P = (data: any) => {
+    const msg = JSON.stringify(data);
+    if (myRole === 'teacher') {
+      Object.values(teacherDcsRef.current).forEach(dc => {
+        if (dc.readyState === 'open') dc.send(msg);
+      });
+    } else if (studentDcRef.current?.readyState === 'open') {
+      studentDcRef.current.send(msg);
     }
   };
 
@@ -86,7 +101,6 @@ export function useClassroom() {
         client.subscribe([
           `${baseTopic}/lobby_sync`,
           `${baseTopic}/signal/${myIdRef.current}`,
-          `${baseTopic}/whiteboard`,
           `${baseTopic}/chat`,
           `${baseTopic}/control/all`,
           `${baseTopic}/control/${myIdRef.current}`
@@ -113,8 +127,6 @@ export function useClassroom() {
         setRoomState(data);
         setInRoom(true);
         setIsConnecting(false);
-      } else if (topic === `${baseTopic}/whiteboard`) {
-        setRoomState(prev => ({ ...prev, ...data }));
       } else if (topic === `${baseTopic}/chat`) {
         setRoomState(prev => ({ ...prev, chatHistory: [...prev.chatHistory, data].slice(-200) }));
       } else if (topic === `${baseTopic}/control/all` || topic === `${baseTopic}/control/${myIdRef.current}`) {
@@ -130,45 +142,29 @@ export function useClassroom() {
     const pc = new RTCPeerConnection(STUN_SERVERS);
     teacherPcsRef.current[studentId] = pc;
 
+    // Create DataChannel for Whiteboard
+    const dc = pc.createDataChannel('whiteboard_sync', { ordered: true });
+    teacherDcsRef.current[studentId] = dc;
+    setupDataChannel(dc);
+
     if (myStreamRef.current) {
       myStreamRef.current.getTracks().forEach(track => pc.addTrack(track, myStreamRef.current!));
     }
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
-        publish(`ephemeral-classroom/${rid}/signal/${studentId}`, {
-          from: myIdRef.current,
-          signal: { type: 'candidate', candidate: event.candidate }
-        });
+        publish(`ephemeral-classroom/${rid}/signal/${studentId}`, { from: myIdRef.current, signal: { type: 'candidate', candidate: event.candidate } });
       }
-    };
-
-    pc.ontrack = (event) => {
-      let audioEl = document.getElementById(`student-audio-${studentId}`) as HTMLAudioElement;
-      if (!audioEl) {
-        audioEl = document.createElement("audio");
-        audioEl.id = `student-audio-${studentId}`;
-        audioEl.autoplay = true;
-        audioEl.style.display = "none";
-        document.body.appendChild(audioEl);
-      }
-      audioEl.srcObject = event.streams[0];
     };
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    publish(`ephemeral-classroom/${rid}/signal/${studentId}`, {
-      from: myIdRef.current,
-      signal: { type: 'offer', sdp: offer }
-    });
+    publish(`ephemeral-classroom/${rid}/signal/${studentId}`, { from: myIdRef.current, signal: { type: 'offer', sdp: offer } });
 
     setRoomState(prev => {
       const newState = {
         ...prev,
-        students: {
-          ...prev.students,
-          [studentId]: { id: studentId, name: studentName, isMuted: prev.isAllMuted, isHandUp: false, canSpeak: !prev.isAllMuted }
-        }
+        students: { ...prev.students, [studentId]: { id: studentId, name: studentName, isMuted: prev.isAllMuted, isHandUp: false, canSpeak: !prev.isAllMuted } }
       };
       publish(`ephemeral-classroom/${rid}/lobby_sync`, newState);
       return newState;
@@ -177,11 +173,7 @@ export function useClassroom() {
 
   const handleSignal = async (from: string, signal: any) => {
     const rid = roomIdRef.current;
-    let pc = myRole === 'teacher' ? teacherPcsRef.current[from] : studentPcRef.current;
-    
-    if (!pc && myRole === 'student') {
-      pc = createStudentPC(from);
-    }
+    let pc = myRole === 'teacher' ? teacherPcsRef.current[from] : (studentPcRef.current || createStudentPC(from));
     if (!pc) return;
 
     try {
@@ -192,21 +184,61 @@ export function useClassroom() {
         publish(`ephemeral-classroom/${rid}/signal/${from}`, { from: myIdRef.current, signal: { type: 'answer', sdp: answer } });
         processIceBuffer(from, pc);
       } else if (signal.type === 'answer') {
-        if (pc.signalingState !== 'stable') {
-          await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-          processIceBuffer(from, pc);
-        }
+        await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+        processIceBuffer(from, pc);
       } else if (signal.type === 'candidate') {
-        if (pc.remoteDescription) {
-          await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
-        } else {
+        if (pc.remoteDescription) await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+        else {
           if (!iceBuffersRef.current[from]) iceBuffersRef.current[from] = [];
           iceBuffersRef.current[from].push(signal.candidate);
         }
       }
-    } catch (err) {
-      console.warn("[WebRTC] Signal Error:", err);
+    } catch (err) { console.warn("WebRTC Signal Error", err); }
+  };
+
+  const createStudentPC = (teacherId: string) => {
+    const rid = roomIdRef.current;
+    const pc = new RTCPeerConnection(STUN_SERVERS);
+    studentPcRef.current = pc;
+
+    pc.ondatachannel = (event) => {
+      studentDcRef.current = event.channel;
+      setupDataChannel(event.channel);
+    };
+
+    if (myStreamRef.current) {
+      myStreamRef.current.getTracks().forEach(track => pc.addTrack(track, myStreamRef.current!));
     }
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        publish(`ephemeral-classroom/${rid}/signal/${teacherId}`, { from: myIdRef.current, signal: { type: 'candidate', candidate: event.candidate } });
+      }
+    };
+
+    pc.ontrack = (event) => {
+      const remoteAudio = document.getElementById("classroom-teacher-voice") as HTMLAudioElement;
+      if (remoteAudio) remoteAudio.srcObject = event.streams[0];
+    };
+    return pc;
+  };
+
+  const setupDataChannel = (dc: RTCDataChannel) => {
+    dc.onopen = () => {
+      console.log("[P2P] DataChannel Opened");
+      // If student, teacher might want to send current page immediately
+      if (myRole === 'teacher') {
+        // We'll handle this in the broadcast
+      }
+    };
+    dc.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'whiteboard_update') {
+        setRoomState(prev => ({ ...prev, ...data.payload }));
+      } else if (data.type === 'draw') {
+        setRoomState(prev => ({ ...prev, whiteboardPaths: [...prev.whiteboardPaths, data.payload] }));
+      }
+    };
   };
 
   const processIceBuffer = async (peerId: string, pc: RTCPeerConnection) => {
@@ -219,43 +251,20 @@ export function useClassroom() {
     }
   };
 
-  const createStudentPC = (teacherId: string) => {
-    const rid = roomIdRef.current;
-    const pc = new RTCPeerConnection(STUN_SERVERS);
-    studentPcRef.current = pc;
-    if (myStreamRef.current) {
-      myStreamRef.current.getTracks().forEach(track => pc.addTrack(track, myStreamRef.current!));
-    }
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        publish(`ephemeral-classroom/${rid}/signal/${teacherId}`, { from: myIdRef.current, signal: { type: 'candidate', candidate: event.candidate } });
-      }
+  const updateWhiteboard = (data: any) => {
+    const whiteboardUpdate = {
+      whiteboardBackgrounds: data.whiteboardBackgrounds,
+      whiteboardPageNum: data.whiteboardPageNum,
+      whiteboardPaths: data.whiteboardPaths
     };
-    pc.ontrack = (event) => {
-      const remoteAudio = document.getElementById("classroom-teacher-voice") as HTMLAudioElement;
-      if (remoteAudio) remoteAudio.srcObject = event.streams[0];
-    };
-    return pc;
+    // Sync via P2P
+    broadcastP2P({ type: 'whiteboard_update', payload: whiteboardUpdate });
+    // Local Update
+    setRoomState(prev => ({ ...prev, ...whiteboardUpdate }));
   };
 
-  const handleControl = (data: any) => {
-    if (data.type === 'mute-all') {
-      setRoomState(prev => ({ ...prev, isAllMuted: data.mute }));
-    } else if (data.type === 'speak-status') {
-      setRoomState(prev => ({
-        ...prev,
-        students: { ...prev.students, [data.studentId]: { ...prev.students[data.studentId], canSpeak: data.canSpeak, isHandUp: data.isHandUp } }
-      }));
-    }
-  };
-
-  const handleTeacherControl = (data: any) => {
-    if (data.type === 'hand-up') {
-      setRoomState(prev => ({
-        ...prev,
-        students: { ...prev.students, [data.studentId]: { ...prev.students[data.studentId], isHandUp: data.isHandUp } }
-      }));
-    }
+  const broadcastDraw = (pathDelta: any) => {
+    broadcastP2P({ type: 'draw', payload: pathDelta });
   };
 
   const sendChatMessage = (content: string, type: 'text' | 'file' = 'text', fileData?: any) => {
@@ -278,38 +287,22 @@ export function useClassroom() {
     publish(`ephemeral-classroom/${roomIdRef.current}/control/all`, { type: 'speak-status', studentId, canSpeak, isHandUp: false });
   };
 
-  const updateWhiteboard = (data: any) => {
-    if (myRole !== 'teacher') return;
-    // data is the partial roomState containing whiteboard info
-    const whiteboardUpdate = {
-      whiteboardBackgrounds: data.whiteboardBackgrounds,
-      whiteboardPageNum: data.whiteboardPageNum,
-      whiteboardPaths: data.whiteboardPaths
-    };
-    publish(`ephemeral-classroom/${roomIdRef.current}/whiteboard`, whiteboardUpdate);
-    setRoomState(prev => ({ ...prev, ...whiteboardUpdate }));
+  const handleControl = (data: any) => {
+    if (data.type === 'mute-all') setRoomState(prev => ({ ...prev, isAllMuted: data.mute }));
+    else if (data.type === 'speak-status') setRoomState(prev => ({ ...prev, students: { ...prev.students, [data.studentId]: { ...prev.students[data.studentId], canSpeak: data.canSpeak, isHandUp: data.isHandUp } } }));
+  };
+
+  const handleTeacherControl = (data: any) => {
+    if (data.type === 'hand-up') setRoomState(prev => ({ ...prev, students: { ...prev.students, [data.studentId]: { ...prev.students[data.studentId], isHandUp: data.isHandUp } } }));
   };
 
   const disconnect = () => {
-    if (mqttClientRef.current) {
-      mqttClientRef.current.end();
-      mqttClientRef.current = null;
-    }
+    if (mqttClientRef.current) mqttClientRef.current.end();
     Object.values(teacherPcsRef.current).forEach((pc: any) => pc.close());
-    teacherPcsRef.current = {};
-    if (studentPcRef.current) {
-      studentPcRef.current.close();
-      studentPcRef.current = null;
-    }
-    if (myStreamRef.current) {
-      myStreamRef.current.getTracks().forEach(t => t.stop());
-      myStreamRef.current = null;
-    }
+    if (studentPcRef.current) studentPcRef.current.close();
+    if (myStreamRef.current) myStreamRef.current.getTracks().forEach(t => t.stop());
     setInRoom(false);
   };
 
-  return {
-    inRoom, roomId, myRole, myNickname, isConnecting, errorMsg, roomState,
-    createRoom, joinRoom, sendChatMessage, updateWhiteboard, toggleMuteAll, toggleHandUp, allowSpeak, disconnect, myStreamRef
-  };
+  return { inRoom, roomId, myRole, myNickname, isConnecting, errorMsg, roomState, createRoom, joinRoom, sendChatMessage, updateWhiteboard, broadcastDraw, toggleMuteAll, toggleHandUp, allowSpeak, disconnect, myStreamRef };
 }
