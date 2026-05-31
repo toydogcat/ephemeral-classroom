@@ -212,6 +212,22 @@ export function useClassroom() {
       myStreamRef.current.getTracks().forEach(track => pc.addTrack(track, myStreamRef.current!));
     }
 
+    // 🟢 新增修改：捕捉電子白板的 Canvas 畫面並注入視訊軌
+    const canvasElement = document.getElementById("classroom-interactive-canvas") as HTMLCanvasElement;
+    if (canvasElement) {
+      try {
+        // 每秒捕捉 15 幀（對電子白板來說 15fps 就非常絲滑，且極省頻寬）
+        const canvasStream = (canvasElement as any).captureStream(15);
+        const videoTrack = canvasStream.getVideoTracks()[0];
+        if (videoTrack) {
+          console.log(`[WebRTC] Successfully captured whiteboard canvas track for student ${studentId}`);
+          pc.addTrack(videoTrack, canvasStream);
+        }
+      } catch (e) {
+        console.error("[WebRTC] Failed to capture canvas stream:", e);
+      }
+    }
+
     pc.onicecandidate = (event) => {
       if (event.candidate) {
         publish(`ephemeral-classroom/${rid}/signal/${studentId}`, { from: myIdRef.current, signal: { type: 'candidate', candidate: event.candidate } });
@@ -304,8 +320,20 @@ export function useClassroom() {
     };
 
     pc.ontrack = (event) => {
-      const remoteAudio = document.getElementById("classroom-teacher-voice") as HTMLAudioElement;
-      if (remoteAudio) remoteAudio.srcObject = event.streams[0];
+      console.log(`[WebRTC] Received remote track: ${event.track.kind}`);
+      
+      if (event.track.kind === 'audio') {
+        // 綁定老師的聲音
+        const remoteAudio = document.getElementById("classroom-teacher-voice") as HTMLAudioElement;
+        if (remoteAudio) remoteAudio.srcObject = event.streams[0];
+      } 
+      else if (event.track.kind === 'video') {
+        // 🟢 新增修改：綁定老師的白板視訊畫面
+        const remoteVideo = document.getElementById("classroom-student-video-whiteboard") as HTMLVideoElement;
+        if (remoteVideo) {
+          remoteVideo.srcObject = event.streams[0];
+        }
+      }
     };
     return pc;
   };
