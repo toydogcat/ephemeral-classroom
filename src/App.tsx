@@ -38,6 +38,7 @@ export default function App() {
     joinRoom,
     sendChatMessage,
     updateWhiteboard,
+    broadcastDraw,
     toggleMuteAll,
     toggleHandUp,
     allowSpeak,
