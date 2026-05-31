@@ -90,13 +90,26 @@ export default function App() {
       analyserRef.current = analyser;
 
       const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      let lastVolume = 0;
+      let lastUpdateTime = 0;
+
       const checkVolume = () => {
         if (!analyserRef.current) return;
+        const now = Date.now();
+        
         analyserRef.current.getByteFrequencyData(dataArray);
         let sum = 0;
         dataArray.forEach((val) => { sum += val; });
         const average = sum / dataArray.length;
-        setVoiceVolume(Math.min(100, Math.round((average / 128) * 100)));
+        const currentVolume = Math.min(100, Math.round((average / 128) * 100));
+        
+        // Throttle updates: only update if volume changed significantly OR every 100ms
+        if (Math.abs(currentVolume - lastVolume) > 5 || (now - lastUpdateTime > 100)) {
+          setVoiceVolume(currentVolume);
+          lastVolume = currentVolume;
+          lastUpdateTime = now;
+        }
+        
         rafRef.current = requestAnimationFrame(checkVolume);
       };
       rafRef.current = requestAnimationFrame(checkVolume);

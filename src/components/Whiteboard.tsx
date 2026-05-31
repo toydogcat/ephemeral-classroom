@@ -42,7 +42,7 @@ export default function Whiteboard({
   // States
   const [color, setColor] = useState<string>("#ef4444"); // default red pencil
   const [lineWidth, setLineWidth] = useState<number>(5);
-  const [isDrawing, setIsDrawing] = useState<boolean>(false);
+  const isDrawingRef = useRef<boolean>(false);
   const [tool, setTool] = useState<"pencil" | "eraser" | "hand">("pencil");
 
   // Zoom & Pan states
@@ -152,7 +152,7 @@ export default function Whiteboard({
     const pos = getCoordinates(e);
     if (!pos) return;
 
-    setIsDrawing(true);
+    isDrawingRef.current = true;
     prevPos.current = pos;
   };
 
@@ -178,7 +178,7 @@ export default function Whiteboard({
       return;
     }
 
-    if (!isHost || !isDrawing || !prevPos.current) return;
+    if (!isHost || !isDrawingRef.current || !prevPos.current) return;
 
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -223,7 +223,7 @@ export default function Whiteboard({
   };
 
   const stopDraw = () => {
-    setIsDrawing(false);
+    isDrawingRef.current = false;
     setIsPanning(false);
     prevPos.current = null;
   };

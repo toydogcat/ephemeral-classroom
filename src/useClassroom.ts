@@ -36,6 +36,7 @@ export function useClassroom() {
   const studentDcRef = useRef<RTCDataChannel | null>(null);
   
   const iceBuffersRef = useRef<{ [peerId: string]: RTCIceCandidateInit[] }>({});
+  const chunkBuffersRef = useRef<{ [peerId: string]: { [msgId: string]: string[] } }>({});
 
   const publish = (topic: string, message: any) => {
     if (mqttClientRef.current) {
@@ -43,15 +44,49 @@ export function useClassroom() {
     }
   };
 
-  // P2P Data Broadcast
+  // P2P Data Broadcast with Chunking support
+  const CHUNK_SIZE = 16000; // ~16KB per chunk
+
   const broadcastP2P = (data: any) => {
     const msg = JSON.stringify(data);
+    if (msg.length > CHUNK_SIZE) {
+      const msgId = Math.random().toString(36).substring(2, 9);
+      const total = Math.ceil(msg.length / CHUNK_SIZE);
+      for (let i = 0; i < total; i++) {
+        const chunk = msg.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+        const chunkData = JSON.stringify({ type: 'chunk', id: msgId, index: i, total, data: chunk });
+        sendToAll(chunkData);
+      }
+    } else {
+      sendToAll(msg);
+    }
+  };
+
+  const sendToAll = (msg: string) => {
     if (myRole === 'teacher') {
       Object.values(teacherDcsRef.current).forEach(dc => {
         if (dc.readyState === 'open') dc.send(msg);
       });
     } else if (studentDcRef.current?.readyState === 'open') {
       studentDcRef.current.send(msg);
+    }
+  };
+
+  const sendToPeer = (peerId: string, data: any) => {
+    const dc = myRole === 'teacher' ? teacherDcsRef.current[peerId] : studentDcRef.current;
+    if (!dc || dc.readyState !== 'open') return;
+
+    const msg = JSON.stringify(data);
+    if (msg.length > CHUNK_SIZE) {
+      const msgId = Math.random().toString(36).substring(2, 9);
+      const total = Math.ceil(msg.length / CHUNK_SIZE);
+      for (let i = 0; i < total; i++) {
+        const chunk = msg.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+        const chunkData = JSON.stringify({ type: 'chunk', id: msgId, index: i, total, data: chunk });
+        dc.send(chunkData);
+      }
+    } else {
+      dc.send(msg);
     }
   };
 
@@ -145,7 +180,7 @@ export function useClassroom() {
     // Create DataChannel for Whiteboard
     const dc = pc.createDataChannel('whiteboard_sync', { ordered: true });
     teacherDcsRef.current[studentId] = dc;
-    setupDataChannel(dc);
+    setupDataChannel(dc, studentId);
 
     if (myStreamRef.current) {
       myStreamRef.current.getTracks().forEach(track => pc.addTrack(track, myStreamRef.current!));
@@ -166,7 +201,9 @@ export function useClassroom() {
         ...prev,
         students: { ...prev.students, [studentId]: { id: studentId, name: studentName, isMuted: prev.isAllMuted, isHandUp: false, canSpeak: !prev.isAllMuted } }
       };
-      publish(`ephemeral-classroom/${rid}/lobby_sync`, newState);
+      // For lobby_sync via MQTT, we strip out heavy background images to stay under broker limits
+      const syncState = { ...newState, whiteboardBackgrounds: [''] };
+      publish(`ephemeral-classroom/${rid}/lobby_sync`, syncState);
       return newState;
     });
   };
@@ -203,7 +240,7 @@ export function useClassroom() {
 
     pc.ondatachannel = (event) => {
       studentDcRef.current = event.channel;
-      setupDataChannel(event.channel);
+      setupDataChannel(event.channel, teacherId);
     };
 
     if (myStreamRef.current) {
@@ -223,20 +260,50 @@ export function useClassroom() {
     return pc;
   };
 
-  const setupDataChannel = (dc: RTCDataChannel) => {
+  const setupDataChannel = (dc: RTCDataChannel, peerId: string) => {
     dc.onopen = () => {
-      console.log("[P2P] DataChannel Opened");
-      // If student, teacher might want to send current page immediately
+      console.log(`[P2P] DataChannel Opened with ${peerId}`);
       if (myRole === 'teacher') {
-        // We'll handle this in the broadcast
+        // Teacher sends current full state (including backgrounds) to student upon connection
+        setRoomState(current => {
+          const syncData = {
+            type: 'whiteboard_update',
+            payload: {
+              whiteboardBackgrounds: current.whiteboardBackgrounds,
+              whiteboardPageNum: current.whiteboardPageNum,
+              whiteboardPaths: current.whiteboardPaths
+            }
+          };
+          sendToPeer(peerId, syncData);
+          return current;
+        });
       }
     };
+
     dc.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+      let data = JSON.parse(event.data);
+
+      if (data.type === 'chunk') {
+        const { id, index, total, data: chunkData } = data;
+        if (!chunkBuffersRef.current[peerId]) chunkBuffersRef.current[peerId] = {};
+        if (!chunkBuffersRef.current[peerId][id]) chunkBuffersRef.current[peerId][id] = new Array(total).fill(null);
+        
+        chunkBuffersRef.current[peerId][id][index] = chunkData;
+
+        // Check if all chunks arrived
+        if (chunkBuffersRef.current[peerId][id].every(c => c !== null)) {
+          const fullMsg = chunkBuffersRef.current[peerId][id].join('');
+          delete chunkBuffersRef.current[peerId][id];
+          data = JSON.parse(fullMsg);
+        } else {
+          return; // Wait for more chunks
+        }
+      }
+
       if (data.type === 'whiteboard_update') {
         setRoomState(prev => ({ ...prev, ...data.payload }));
       } else if (data.type === 'draw') {
-        setRoomState(prev => ({ ...prev, whiteboardPaths: [...prev.whiteboardPaths, data.payload] }));
+        setRoomState(prev => ({ ...prev, whiteboardPaths: [...prev.whiteboardPaths, data.payload].slice(-5000) }));
       }
     };
   };
@@ -264,7 +331,10 @@ export function useClassroom() {
   };
 
   const broadcastDraw = (pathDelta: any) => {
+    // Sync via P2P
     broadcastP2P({ type: 'draw', payload: pathDelta });
+    // Update local teacher state so it persists during re-renders
+    setRoomState(prev => ({ ...prev, whiteboardPaths: [...prev.whiteboardPaths, pathDelta].slice(-5000) }));
   };
 
   const sendChatMessage = (content: string, type: 'text' | 'file' = 'text', fileData?: any) => {
