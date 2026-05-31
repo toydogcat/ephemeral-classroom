@@ -212,7 +212,7 @@ export function useClassroom() {
       myStreamRef.current.getTracks().forEach(track => pc.addTrack(track, myStreamRef.current!));
     }
 
-    // 🟢 新增修改：捕捉電子白板的 Canvas 畫面並注入視訊軌
+    // 2. 注入電子白板 Canvas 視訊軌 (改用 addTransceiver 強制控制方向)
     const canvasElement = document.getElementById("classroom-interactive-canvas") as HTMLCanvasElement;
     if (canvasElement) {
       try {
@@ -221,7 +221,12 @@ export function useClassroom() {
         const videoTrack = canvasStream.getVideoTracks()[0];
         if (videoTrack) {
           console.log(`[WebRTC] Successfully captured whiteboard canvas track for student ${studentId}`);
-          pc.addTrack(videoTrack, canvasStream);
+          
+          // 🟢 關鍵修正：不使用 addTrack，直接改用 addTransceiver，並指定方向為 sendonly
+          pc.addTransceiver(videoTrack, {
+            direction: 'sendonly',
+            streams: [canvasStream]
+          });
 
           // 🔥 關鍵修正：強迫 Canvas 進行一次微小的重繪，激活 captureStream 的首幀發送
           const ctx = canvasElement.getContext('2d');
@@ -321,9 +326,14 @@ export function useClassroom() {
       setupDataChannel(event.channel, teacherId);
     };
 
+    // 1. 注入學生的音訊軌
     if (myStreamRef.current) {
       myStreamRef.current.getTracks().forEach(track => pc.addTrack(track, myStreamRef.current!));
     }
+
+    // 🟢 關鍵修正：學生端主動加上一條視訊的 Transceiver，方向指定為 recvonly
+    // 這會強迫學生的 WebRTC 引擎在看到老師的 Offer 有視訊時，樂意接受它，而不是拒絕
+    pc.addTransceiver('video', { direction: 'recvonly' });
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
