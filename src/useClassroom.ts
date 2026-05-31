@@ -139,7 +139,10 @@ export function useClassroom() {
           `${baseTopic}/control/${myIdRef.current}`
         ], (err) => {
           if (!err) {
-            setTimeout(() => publish(`${baseTopic}/join`, { id: myIdRef.current, name: nickname }), 500);
+            // 延遲發送 join，確保訂閱已生效
+            setTimeout(() => {
+              publish(`${baseTopic}/join`, { id: myIdRef.current, name: nickname });
+            }, 800);
           } else {
             setErrorMsg("MQTT 訂閱失敗");
             setIsConnecting(false);
@@ -153,7 +156,10 @@ export function useClassroom() {
       const baseTopic = `ephemeral-classroom/${rid}`;
 
       if (topic === `${baseTopic}/join` && role === 'teacher') {
-        handleStudentJoin(data.id, data.name);
+        // 老師不處理自己的 join
+        if (data.id !== myIdRef.current) {
+          handleStudentJoin(data.id, data.name);
+        }
       } else if (topic === `${baseTopic}/signal/${myIdRef.current}`) {
         handleSignal(data.from, data.signal);
       } else if (topic === `${baseTopic}/lobby_sync` && role === 'student') {
@@ -171,15 +177,19 @@ export function useClassroom() {
   };
 
   const handleStudentJoin = async (studentId: string, studentName: string) => {
-    // 防止重複連線建立
+    // 嚴格防止重複建立連線
     if (teacherPcsRef.current[studentId] && teacherPcsRef.current[studentId].signalingState !== 'closed') {
-      console.log(`[WebRTC] Student ${studentId} already connected, skipping join logic.`);
+      console.log(`[WebRTC] Student ${studentId} already in signaling state: ${teacherPcsRef.current[studentId].signalingState}`);
       return;
     }
     
+    console.log(`[WebRTC] Initiating connection with ${studentName} (${studentId})`);
     const rid = roomIdRef.current;
     const pc = new RTCPeerConnection(STUN_SERVERS);
     teacherPcsRef.current[studentId] = pc;
+
+    // 清理可能殘留的鎖
+    signalingLockRef.current[studentId] = false;
 
     // Create DataChannel for Whiteboard
     const dc = pc.createDataChannel('whiteboard_sync', { ordered: true });
@@ -217,10 +227,9 @@ export function useClassroom() {
     let pc = myRole === 'teacher' ? teacherPcsRef.current[from] : (studentPcRef.current || createStudentPC(from));
     if (!pc) return;
 
-    // Signaling Lock to prevent parallel setLocal/RemoteDescription calls
+    // 防止並行處理同一個 peer 的信令
     if (signalingLockRef.current[from]) {
-      console.log("[WebRTC] Signaling locked for peer", from, ". Retrying...");
-      setTimeout(() => handleSignal(from, signal), 200);
+      setTimeout(() => handleSignal(from, signal), 50);
       return;
     }
 
@@ -228,8 +237,10 @@ export function useClassroom() {
       signalingLockRef.current[from] = true;
 
       if (signal.type === 'offer') {
-        if (pc.signalingState !== 'stable') {
-          console.warn("[WebRTC] Received offer while not in stable state.");
+        // 如果已經是 stable，代表連線已建立，忽略重複的 offer
+        if (pc.signalingState === 'stable') {
+          console.log("[WebRTC] Already stable, ignoring redundant offer.");
+          return;
         }
         await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
         const answer = await pc.createAnswer();
@@ -237,21 +248,23 @@ export function useClassroom() {
         publish(`ephemeral-classroom/${rid}/signal/${from}`, { from: myIdRef.current, signal: { type: 'answer', sdp: answer } });
         processIceBuffer(from, pc);
       } else if (signal.type === 'answer') {
-        if (pc.signalingState !== 'have-local-offer') {
-          console.log("[WebRTC] Received answer but state is", pc.signalingState, ". Skipping.");
-        } else {
+        // 只有在 have-local-offer 狀態下才處理 answer
+        if (pc.signalingState === 'have-local-offer') {
           await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
           processIceBuffer(from, pc);
+        } else {
+          console.log("[WebRTC] Ignoring answer in state:", pc.signalingState);
         }
       } else if (signal.type === 'candidate') {
-        if (pc.remoteDescription) await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
-        else {
+        if (pc.remoteDescription) {
+          await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+        } else {
           if (!iceBuffersRef.current[from]) iceBuffersRef.current[from] = [];
           iceBuffersRef.current[from].push(signal.candidate);
         }
       }
-    } catch (err) { 
-      console.warn("WebRTC Signal Error", err); 
+    } catch (err) {
+      console.warn("[WebRTC] Signal Handling Error:", err);
     } finally {
       signalingLockRef.current[from] = false;
     }
