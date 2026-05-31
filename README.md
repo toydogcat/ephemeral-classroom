@@ -1,2 +1,4 @@
 # ephemeral-classroom
-Ephemeral Class Room.
+
+[Demo](https://toydogcat.github.io/ephemeral-classroom/)
+

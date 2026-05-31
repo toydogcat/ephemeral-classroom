@@ -1,0 +1,6 @@
+{
+  "name": "臨時線上教室",
+  "description": "一個輕量、實時的臨時線上課堂，具備語音連線、舉手發言、即時聊天、檔案分享、以及多功能智慧電子白板與講義同步系統。",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

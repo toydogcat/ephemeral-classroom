@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-TW">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vibe Classroom | 臨時多人連線教室</title>
+    <!-- Vercount.one 瀏覽計次器 -->
+    <script async src="https://www.vercount.one/js" crossorigin="anonymous"></script>
+  </head>
+  <body class="bg-slate-900">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    
+    <!-- 瀏覽次數顯示 (隱藏在頁尾或特定位置) -->
+    <div class="fixed bottom-2 left-2 text-[8px] text-slate-700 pointer-events-none font-mono uppercase opacity-30 z-50">
+      PV: <span id="vercount_value_site_pv">--</span> | UV: <span id="vercount_value_site_uv">--</span>
+    </div>
+  </body>
+</html>
