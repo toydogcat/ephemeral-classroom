@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Sparkles, User, Key, Users, BookOpen } from "lucide-react";
 
 interface JoinPageProps {
@@ -17,6 +17,16 @@ export default function JoinPage({
   const [roomIdInput, setRoomIdInput] = useState("");
   const [nameInput, setNameInput] = useState("");
   const [role, setRole] = useState<"student" | "teacher">("student");
+
+  // Read room ID from URL query parameter
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const rid = params.get("room");
+    if (rid && rid.length === 6 && !isNaN(Number(rid))) {
+      setRoomIdInput(rid);
+      setRole("student");
+    }
+  }, []);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();

@@ -32,6 +32,7 @@ export function useClassroom() {
 
   const publish = (topic: string, message: any) => {
     if (mqttClientRef.current) {
+      console.log(`[MQTT] Publishing to ${topic}:`, message);
       mqttClientRef.current.publish(topic, JSON.stringify(message));
     }
   };
@@ -68,7 +69,9 @@ export function useClassroom() {
     mqttClientRef.current = client;
 
     client.on('connect', () => {
+      console.log(`[MQTT] Connected as ${role} (${myIdRef.current}) to room ${rid}`);
       const baseTopic = `ephemeral-classroom/${rid}`;
+      
       if (role === 'teacher') {
         client.subscribe(`${baseTopic}/join`);
         client.subscribe(`${baseTopic}/signal/${myIdRef.current}`);
@@ -79,26 +82,41 @@ export function useClassroom() {
         setIsConnecting(false);
         setRoomState(prev => ({ ...prev, roomId: rid, hostSocketId: myIdRef.current }));
       } else {
-        client.subscribe(`${baseTopic}/lobby_sync`);
-        client.subscribe(`${baseTopic}/signal/${myIdRef.current}`);
-        client.subscribe(`${baseTopic}/whiteboard`);
-        client.subscribe(`${baseTopic}/chat`);
-        client.subscribe(`${baseTopic}/control/all`);
-        client.subscribe(`${baseTopic}/control/${myIdRef.current}`);
-
-        publish(`${baseTopic}/join`, { id: myIdRef.current, name: nickname });
+        // Student subscribes first
+        client.subscribe([
+          `${baseTopic}/lobby_sync`,
+          `${baseTopic}/signal/${myIdRef.current}`,
+          `${baseTopic}/whiteboard`,
+          `${baseTopic}/chat`,
+          `${baseTopic}/control/all`,
+          `${baseTopic}/control/${myIdRef.current}`
+        ], (err) => {
+          if (!err) {
+            console.log(`[MQTT] Student subscriptions active. Sending join request...`);
+            // Small delay to ensure subscriptions are processed by broker
+            setTimeout(() => {
+              publish(`${baseTopic}/join`, { id: myIdRef.current, name: nickname });
+            }, 500);
+          } else {
+            console.error(`[MQTT] Subscription error:`, err);
+            setErrorMsg("MQTT 訂閱失敗，請刷新重試。");
+            setIsConnecting(false);
+          }
+        });
       }
     });
 
     client.on('message', (topic, message) => {
       const data = JSON.parse(message.toString());
       const baseTopic = `ephemeral-classroom/${rid}`;
+      console.log(`[MQTT] Message received on ${topic}:`, data);
 
       if (topic === `${baseTopic}/join` && role === 'teacher') {
         handleStudentJoin(data.id, data.name);
       } else if (topic === `${baseTopic}/signal/${myIdRef.current}`) {
         handleSignal(data.from, data.signal);
       } else if (topic === `${baseTopic}/lobby_sync` && role === 'student') {
+        console.log(`[MQTT] Received lobby sync. Joining room...`);
         setRoomState(prev => ({ ...prev, ...data }));
         setInRoom(true);
         setIsConnecting(false);
@@ -112,9 +130,16 @@ export function useClassroom() {
         handleTeacherControl(data);
       }
     });
+
+    client.on('error', (err) => {
+      console.error(`[MQTT] Client error:`, err);
+      setErrorMsg("MQTT 連線錯誤，請確認網路或更換瀏覽器。");
+      setIsConnecting(false);
+    });
   };
 
   const handleStudentJoin = async (studentId: string, studentName: string) => {
+    console.log(`[Teacher] Handling join request from ${studentName} (${studentId})`);
     const pc = new RTCPeerConnection(STUN_SERVERS);
     teacherPcsRef.current[studentId] = pc;
 
@@ -132,6 +157,7 @@ export function useClassroom() {
     };
 
     pc.ontrack = (event) => {
+      console.log(`[Teacher] Received track from student ${studentId}`);
       let audioEl = document.getElementById(`student-audio-${studentId}`) as HTMLAudioElement;
       if (!audioEl) {
         audioEl = document.createElement("audio");
@@ -158,12 +184,14 @@ export function useClassroom() {
           [studentId]: { id: studentId, name: studentName, isMuted: prev.isAllMuted, isHandUp: false, canSpeak: !prev.isAllMuted }
         }
       };
+      console.log(`[Teacher] Broadcasting updated lobby state...`);
       publish(`ephemeral-classroom/${roomId}/lobby_sync`, newState);
       return newState;
     });
   };
 
   const handleSignal = async (from: string, signal: any) => {
+    console.log(`[WebRTC] Received signal from ${from}:`, signal.type);
     const pc = myRole === 'teacher' ? teacherPcsRef.current[from] : (studentPcRef.current || createStudentPC(from));
     if (signal.type === 'offer') {
       await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
@@ -178,6 +206,7 @@ export function useClassroom() {
   };
 
   const createStudentPC = (teacherId: string) => {
+    console.log(`[Student] Creating PeerConnection to teacher ${teacherId}`);
     const pc = new RTCPeerConnection(STUN_SERVERS);
     studentPcRef.current = pc;
     if (myStreamRef.current) {
@@ -189,6 +218,7 @@ export function useClassroom() {
       }
     };
     pc.ontrack = (event) => {
+      console.log(`[Student] Received teacher audio stream`);
       const remoteAudio = document.getElementById("classroom-teacher-voice") as HTMLAudioElement;
       if (remoteAudio) remoteAudio.srcObject = event.streams[0];
     };
