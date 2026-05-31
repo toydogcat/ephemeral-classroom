@@ -80,6 +80,7 @@ export default function App() {
   // Evaluate voice audio volume waves
   const startAudioAnalyser = (stream: MediaStream) => {
     try {
+      stopAudioAnalyser(); // Ensure previous loop is stopped
       if (audioContextRef.current) audioContextRef.current.close();
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       const analyser = audioContext.createAnalyser();

@@ -263,22 +263,9 @@ export function useClassroom() {
   const setupDataChannel = (dc: RTCDataChannel, peerId: string) => {
     dc.onopen = () => {
       console.log(`[P2P] DataChannel Opened with ${peerId}`);
-      if (myRole === 'teacher') {
-        // 延遲 800ms 確保學生的 React Component、Canvas 與 WebRTC 接收通道完全 Bind 好
-        setTimeout(() => {
-          setRoomState(current => {
-            const syncData = {
-              type: 'whiteboard_update',
-              payload: {
-                whiteboardBackgrounds: current.whiteboardBackgrounds,
-                whiteboardPageNum: current.whiteboardPageNum,
-                whiteboardPaths: current.whiteboardPaths
-              }
-            };
-            sendToPeer(peerId, syncData);
-            return current;
-          });
-        }, 800);
+      if (myRole === 'student') {
+        // Student requests current full state from teacher once channel is ready
+        sendToPeer(peerId, { type: 'request_init_state' });
       }
     };
 
@@ -302,7 +289,21 @@ export function useClassroom() {
         }
       }
 
-      if (data.type === 'whiteboard_update') {
+      if (data.type === 'request_init_state' && myRole === 'teacher') {
+        // Teacher responds with full state (including backgrounds)
+        setRoomState(current => {
+          const syncData = {
+            type: 'whiteboard_update',
+            payload: {
+              whiteboardBackgrounds: current.whiteboardBackgrounds,
+              whiteboardPageNum: current.whiteboardPageNum,
+              whiteboardPaths: current.whiteboardPaths
+            }
+          };
+          sendToPeer(peerId, syncData);
+          return current;
+        });
+      } else if (data.type === 'whiteboard_update') {
         setRoomState(prev => ({ ...prev, ...data.payload }));
       } else if (data.type === 'draw') {
         setRoomState(prev => ({ ...prev, whiteboardPaths: [...prev.whiteboardPaths, data.payload].slice(-5000) }));
@@ -332,11 +333,17 @@ export function useClassroom() {
     setRoomState(prev => ({ ...prev, ...whiteboardUpdate }));
   };
 
-  const broadcastDraw = (pathDelta: any) => {
+  const broadcastDraw = (pathDeltaOrBatch: any) => {
     // Sync via P2P
-    broadcastP2P({ type: 'draw', payload: pathDelta });
+    broadcastP2P({ type: 'draw', payload: pathDeltaOrBatch });
     // Update local teacher state so it persists during re-renders
-    setRoomState(prev => ({ ...prev, whiteboardPaths: [...prev.whiteboardPaths, pathDelta].slice(-5000) }));
+    setRoomState(prev => {
+      const batch = Array.isArray(pathDeltaOrBatch) ? pathDeltaOrBatch : [pathDeltaOrBatch];
+      return { 
+        ...prev, 
+        whiteboardPaths: [...prev.whiteboardPaths, ...batch].slice(-5000) 
+      };
+    });
   };
 
   const sendChatMessage = (content: string, type: 'text' | 'file' = 'text', fileData?: any) => {

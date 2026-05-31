@@ -58,10 +58,28 @@ export default function Whiteboard({
   );
 
   const prevPos = useRef<{ x: number; y: number } | null>(null);
+  const currentPointsBuffer = useRef<any[]>([]);
+  const requestRef = useRef<number | null>(null);
 
   // Logical grid coordinates (independent of physical dimensions to guarantee 100% student mirroring)
   const LOGICAL_WIDTH = 1200;
   const LOGICAL_HEIGHT = 900;
+
+  // Process buffered drawing points and emit them in batches
+  const flushDrawingBuffer = () => {
+    if (currentPointsBuffer.current.length > 0) {
+      onDraw(currentPointsBuffer.current);
+      currentPointsBuffer.current = [];
+    }
+    requestRef.current = requestAnimationFrame(flushDrawingBuffer);
+  };
+
+  useEffect(() => {
+    requestRef.current = requestAnimationFrame(flushDrawingBuffer);
+    return () => {
+      if (requestRef.current) cancelAnimationFrame(requestRef.current);
+    };
+  }, []);
 
   // Initialize and clear/redraw paths when slide, backgrounds, or server-stored drawing state shifts
   useEffect(() => {
@@ -75,24 +93,27 @@ export default function Whiteboard({
 
     // Apply all historical drawing operations on this slide
     if (paths && paths.length > 0) {
-      paths.forEach((p) => {
-        ctx.beginPath();
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-        ctx.lineWidth = p.size;
+      paths.forEach((pOrBatch) => {
+        const batch = Array.isArray(pOrBatch) ? pOrBatch : [pOrBatch];
+        batch.forEach((p) => {
+          ctx.beginPath();
+          ctx.lineCap = "round";
+          ctx.lineJoin = "round";
+          ctx.lineWidth = p.size;
 
-        if (p.type === "erase") {
-          ctx.globalCompositeOperation = "destination-out";
-          ctx.strokeStyle = "rgba(0,0,0,1)";
-        } else {
-          ctx.globalCompositeOperation = "source-over";
-          ctx.strokeStyle = p.color;
-        }
+          if (p.type === "erase") {
+            ctx.globalCompositeOperation = "destination-out";
+            ctx.strokeStyle = "rgba(0,0,0,1)";
+          } else {
+            ctx.globalCompositeOperation = "source-over";
+            ctx.strokeStyle = p.color;
+          }
 
-        ctx.moveTo(p.x1, p.y1);
-        ctx.lineTo(p.x2, p.y2);
-        ctx.stroke();
-        ctx.closePath();
+          ctx.moveTo(p.x1, p.y1);
+          ctx.lineTo(p.x2, p.y2);
+          ctx.stroke();
+          ctx.closePath();
+        });
       });
 
       // Restore composite operation default
@@ -118,26 +139,17 @@ export default function Whiteboard({
       clientY = e.clientY;
     }
 
-    // 1. 取得相對於畫布 DOM 左上角的點擊像素位置
-    const relativeX = clientX - rect.left;
-    const relativeY = clientY - rect.top;
+    // 計算點擊位置相對於畫布的百分比，避免絕對寬高受視窗大小影響
+    const relativeX = (clientX - rect.left) / rect.width;
+    const relativeY = (clientY - rect.top) / rect.height;
 
-    // 2. 因為 getBoundingClientRect() 取得的是受到 CSS transform scale 影響後的實際寬高，
-    //    我們必須將它還原回未縮放前的實體 DOM 像素大小：
-    const originalDOMWidth = rect.width / zoom;
-    const originalDOMHeight = rect.height / zoom;
+    // 將 0.0 ~ 1.0 的百分比映射回 1200x900 的邏輯座標
+    // 這裡我們直接計算「撤銷 Transform」後的邏輯位置
+    const centerX = 0.5;
+    const centerY = 0.5;
 
-    // 3. 考慮到 transform-origin: center center 的縮放與平移複合效應：
-    //    將點擊點平移至中心，撤銷縮放，撤銷平移，再移回左上角
-    const centerX = rect.width / 2;
-    const centerY = rect.height / 2;
-
-    const unscaledX = (relativeX - centerX) / zoom + (originalDOMWidth / 2) - (panOffset.x / zoom);
-    const unscaledY = (relativeY - centerY) / zoom + (originalDOMHeight / 2) - (panOffset.y / zoom);
-
-    // 4. 最後映射到你的 LOGICAL 1200x900 網格
-    const x = (unscaledX / originalDOMWidth) * LOGICAL_WIDTH;
-    const y = (unscaledY / originalDOMHeight) * LOGICAL_HEIGHT;
+    const x = ((relativeX - centerX) / zoom + centerX - (panOffset.x / rect.width)) * LOGICAL_WIDTH;
+    const y = ((relativeY - centerY) / zoom + centerY - (panOffset.y / rect.height)) * LOGICAL_HEIGHT;
 
     // 防止超出邊界
     return {
@@ -229,11 +241,8 @@ export default function Whiteboard({
     ctx.closePath();
     ctx.globalCompositeOperation = "source-over"; // Reset composite state
 
-    // Emit event coordinate delta back to signaling room for socket broadcasting
-    // Note: We should ideally throttle this if moving too fast, 
-    // but for simple path sync, one message per stroke segment is common.
-    // However, to follow the recommendation:
-    onDraw({
+    // Buffer point delta for batch emission
+    currentPointsBuffer.current.push({
       x1: prevPos.current.x,
       y1: prevPos.current.y,
       x2: currentPos.x,
