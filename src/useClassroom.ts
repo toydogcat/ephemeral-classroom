@@ -173,6 +173,12 @@ export function useClassroom() {
   };
 
   const handleStudentJoin = async (studentId: string, studentName: string) => {
+    // 防止重複連線建立
+    if (teacherPcsRef.current[studentId] && teacherPcsRef.current[studentId].signalingState !== 'closed') {
+      console.log(`[WebRTC] Student ${studentId} already connected, skipping join logic.`);
+      return;
+    }
+    
     const rid = roomIdRef.current;
     const pc = new RTCPeerConnection(STUN_SERVERS);
     teacherPcsRef.current[studentId] = pc;
@@ -215,12 +221,20 @@ export function useClassroom() {
 
     try {
       if (signal.type === 'offer') {
+        if (pc.signalingState !== 'stable') {
+          console.warn("[WebRTC] Received offer while not in stable state, attempting to reset.");
+          // P2P 衝突處理，通常簡單做法是關閉舊的
+        }
         await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         publish(`ephemeral-classroom/${rid}/signal/${from}`, { from: myIdRef.current, signal: { type: 'answer', sdp: answer } });
         processIceBuffer(from, pc);
       } else if (signal.type === 'answer') {
+        if (pc.signalingState === 'stable') {
+          console.log("[WebRTC] Received answer but already stable. Skipping.");
+          return;
+        }
         await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
         processIceBuffer(from, pc);
       } else if (signal.type === 'candidate') {
@@ -306,7 +320,8 @@ export function useClassroom() {
           sendToPeer(peerId, syncData);
           return current;
         });
-      } else if (data.type === 'whiteboard_update') {
+      if (data.type === 'whiteboard_update') {
+        console.log("[P2P] Received whiteboard_update", data.payload);
         setRoomState(prev => ({ ...prev, ...data.payload }));
       } else if (data.type === 'draw') {
         setRoomState(prev => {
