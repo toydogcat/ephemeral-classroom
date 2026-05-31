@@ -30,10 +30,12 @@ export function useClassroom() {
   const myStreamRef = useRef<MediaStream | null>(null);
   const teacherPcsRef = useRef<{ [studentId: string]: RTCPeerConnection }>({});
   const studentPcRef = useRef<RTCPeerConnection | null>(null);
+  
+  // Buffers for ICE candidates arriving before remote description
+  const iceBuffersRef = useRef<{ [peerId: string]: RTCIceCandidateInit[] }>({});
 
   const publish = (topic: string, message: any) => {
     if (mqttClientRef.current) {
-      console.log(`[MQTT] Publishing to ${topic}:`, message);
       mqttClientRef.current.publish(topic, JSON.stringify(message));
     }
   };
@@ -65,21 +67,18 @@ export function useClassroom() {
     setMyRole(role);
     setMyNickname(nickname);
     setRoomId(rid);
-    roomIdRef.current = rid; // 重要：立即同步更新 Ref
+    roomIdRef.current = rid;
 
     const client = mqtt.connect(BROKER_URL);
     mqttClientRef.current = client;
 
     client.on('connect', () => {
-      console.log(`[MQTT] Connected as ${role} (${myIdRef.current}) to room ${rid}`);
       const baseTopic = `ephemeral-classroom/${rid}`;
-      
       if (role === 'teacher') {
         client.subscribe(`${baseTopic}/join`);
         client.subscribe(`${baseTopic}/signal/${myIdRef.current}`);
         client.subscribe(`${baseTopic}/chat`);
         client.subscribe(`${baseTopic}/control/teacher`);
-
         setInRoom(true);
         setIsConnecting(false);
         setRoomState(prev => ({ ...prev, roomId: rid, hostSocketId: myIdRef.current }));
@@ -93,12 +92,8 @@ export function useClassroom() {
           `${baseTopic}/control/${myIdRef.current}`
         ], (err) => {
           if (!err) {
-            console.log(`[MQTT] Student subscriptions active. Sending join request...`);
-            setTimeout(() => {
-              publish(`${baseTopic}/join`, { id: myIdRef.current, name: nickname });
-            }, 500);
+            setTimeout(() => publish(`${baseTopic}/join`, { id: myIdRef.current, name: nickname }), 500);
           } else {
-            console.error(`[MQTT] Subscription error:`, err);
             setErrorMsg("MQTT 訂閱失敗");
             setIsConnecting(false);
           }
@@ -109,14 +104,12 @@ export function useClassroom() {
     client.on('message', (topic, message) => {
       const data = JSON.parse(message.toString());
       const baseTopic = `ephemeral-classroom/${rid}`;
-      console.log(`[MQTT] Incoming topic: ${topic}`);
 
       if (topic === `${baseTopic}/join` && role === 'teacher') {
         handleStudentJoin(data.id, data.name);
       } else if (topic === `${baseTopic}/signal/${myIdRef.current}`) {
         handleSignal(data.from, data.signal);
       } else if (topic === `${baseTopic}/lobby_sync` && role === 'student') {
-        console.log(`[MQTT] Received lobby sync. Entering classroom.`);
         setRoomState(data);
         setInRoom(true);
         setIsConnecting(false);
@@ -134,8 +127,6 @@ export function useClassroom() {
 
   const handleStudentJoin = async (studentId: string, studentName: string) => {
     const rid = roomIdRef.current;
-    console.log(`[Teacher] Student ${studentName} joining room ${rid}`);
-    
     const pc = new RTCPeerConnection(STUN_SERVERS);
     teacherPcsRef.current[studentId] = pc;
 
@@ -186,16 +177,45 @@ export function useClassroom() {
 
   const handleSignal = async (from: string, signal: any) => {
     const rid = roomIdRef.current;
-    const pc = myRole === 'teacher' ? teacherPcsRef.current[from] : (studentPcRef.current || createStudentPC(from));
-    if (signal.type === 'offer') {
-      await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      publish(`ephemeral-classroom/${rid}/signal/${from}`, { from: myIdRef.current, signal: { type: 'answer', sdp: answer } });
-    } else if (signal.type === 'answer') {
-      await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-    } else if (signal.type === 'candidate') {
-      await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+    let pc = myRole === 'teacher' ? teacherPcsRef.current[from] : studentPcRef.current;
+    
+    if (!pc && myRole === 'student') {
+      pc = createStudentPC(from);
+    }
+    if (!pc) return;
+
+    try {
+      if (signal.type === 'offer') {
+        await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        publish(`ephemeral-classroom/${rid}/signal/${from}`, { from: myIdRef.current, signal: { type: 'answer', sdp: answer } });
+        processIceBuffer(from, pc);
+      } else if (signal.type === 'answer') {
+        if (pc.signalingState !== 'stable') {
+          await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+          processIceBuffer(from, pc);
+        }
+      } else if (signal.type === 'candidate') {
+        if (pc.remoteDescription) {
+          await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+        } else {
+          if (!iceBuffersRef.current[from]) iceBuffersRef.current[from] = [];
+          iceBuffersRef.current[from].push(signal.candidate);
+        }
+      }
+    } catch (err) {
+      console.warn("[WebRTC] Signal Error:", err);
+    }
+  };
+
+  const processIceBuffer = async (peerId: string, pc: RTCPeerConnection) => {
+    const buffer = iceBuffersRef.current[peerId];
+    if (buffer) {
+      while (buffer.length > 0) {
+        const candidate = buffer.shift();
+        if (candidate) await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      }
     }
   };
 
@@ -260,7 +280,14 @@ export function useClassroom() {
 
   const updateWhiteboard = (data: any) => {
     if (myRole !== 'teacher') return;
-    publish(`ephemeral-classroom/${roomIdRef.current}/whiteboard`, data);
+    // data is the partial roomState containing whiteboard info
+    const whiteboardUpdate = {
+      whiteboardBackgrounds: data.whiteboardBackgrounds,
+      whiteboardPageNum: data.whiteboardPageNum,
+      whiteboardPaths: data.whiteboardPaths
+    };
+    publish(`ephemeral-classroom/${roomIdRef.current}/whiteboard`, whiteboardUpdate);
+    setRoomState(prev => ({ ...prev, ...whiteboardUpdate }));
   };
 
   const disconnect = () => {
