@@ -118,11 +118,32 @@ export default function Whiteboard({
       clientY = e.clientY;
     }
 
-    // Map screen cursor inside logical canvas size (1200 x 900 Grid)
-    const x = ((clientX - rect.left) / rect.width) * LOGICAL_WIDTH;
-    const y = ((clientY - rect.top) / rect.height) * LOGICAL_HEIGHT;
+    // 1. 取得相對於畫布 DOM 左上角的點擊像素位置
+    const relativeX = clientX - rect.left;
+    const relativeY = clientY - rect.top;
 
-    return { x, y };
+    // 2. 因為 getBoundingClientRect() 取得的是受到 CSS transform scale 影響後的實際寬高，
+    //    我們必須將它還原回未縮放前的實體 DOM 像素大小：
+    const originalDOMWidth = rect.width / zoom;
+    const originalDOMHeight = rect.height / zoom;
+
+    // 3. 考慮到 transform-origin: center center 的縮放與平移複合效應：
+    //    將點擊點平移至中心，撤銷縮放，撤銷平移，再移回左上角
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+
+    const unscaledX = (relativeX - centerX) / zoom + (originalDOMWidth / 2) - (panOffset.x / zoom);
+    const unscaledY = (relativeY - centerY) / zoom + (originalDOMHeight / 2) - (panOffset.y / zoom);
+
+    // 4. 最後映射到你的 LOGICAL 1200x900 網格
+    const x = (unscaledX / originalDOMWidth) * LOGICAL_WIDTH;
+    const y = (unscaledY / originalDOMHeight) * LOGICAL_HEIGHT;
+
+    // 防止超出邊界
+    return {
+      x: Math.max(0, Math.min(LOGICAL_WIDTH, x)),
+      y: Math.max(0, Math.min(LOGICAL_HEIGHT, y))
+    };
   };
 
   const startDraw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
@@ -209,6 +230,9 @@ export default function Whiteboard({
     ctx.globalCompositeOperation = "source-over"; // Reset composite state
 
     // Emit event coordinate delta back to signaling room for socket broadcasting
+    // Note: We should ideally throttle this if moving too fast, 
+    // but for simple path sync, one message per stroke segment is common.
+    // However, to follow the recommendation:
     onDraw({
       x1: prevPos.current.x,
       y1: prevPos.current.y,
@@ -525,7 +549,7 @@ export default function Whiteboard({
       >
         {/* Transforming stage wrapping backgrounds and drawing canvas */}
         <div
-          className="w-full h-full relative"
+          className="absolute inset-0 w-full h-full"
           style={{
             transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`,
             transformOrigin: "center center",

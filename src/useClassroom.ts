@@ -264,19 +264,21 @@ export function useClassroom() {
     dc.onopen = () => {
       console.log(`[P2P] DataChannel Opened with ${peerId}`);
       if (myRole === 'teacher') {
-        // Teacher sends current full state (including backgrounds) to student upon connection
-        setRoomState(current => {
-          const syncData = {
-            type: 'whiteboard_update',
-            payload: {
-              whiteboardBackgrounds: current.whiteboardBackgrounds,
-              whiteboardPageNum: current.whiteboardPageNum,
-              whiteboardPaths: current.whiteboardPaths
-            }
-          };
-          sendToPeer(peerId, syncData);
-          return current;
-        });
+        // 延遲 800ms 確保學生的 React Component、Canvas 與 WebRTC 接收通道完全 Bind 好
+        setTimeout(() => {
+          setRoomState(current => {
+            const syncData = {
+              type: 'whiteboard_update',
+              payload: {
+                whiteboardBackgrounds: current.whiteboardBackgrounds,
+                whiteboardPageNum: current.whiteboardPageNum,
+                whiteboardPaths: current.whiteboardPaths
+              }
+            };
+            sendToPeer(peerId, syncData);
+            return current;
+          });
+        }, 800);
       }
     };
 

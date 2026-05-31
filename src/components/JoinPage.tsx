@@ -30,6 +30,16 @@ export default function JoinPage({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+
+    // 解鎖瀏覽器音訊限制 (Autoplay Policy)
+    const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext);
+    if (AudioContextClass) {
+      const dummyCtx = new AudioContextClass();
+      if (dummyCtx.state === 'suspended') {
+        dummyCtx.resume();
+      }
+    }
+
     if (role === "student") {
       if (!roomIdInput || roomIdInput.length !== 6 || isNaN(Number(roomIdInput))) {
         alert("請輸入有效的 6 位數課堂房間號！");
