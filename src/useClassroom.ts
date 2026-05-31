@@ -243,6 +243,9 @@ export function useClassroom() {
       }
     };
 
+    // 🟢 關鍵修正：微調時序，等待 100ms 讓 Canvas 視訊軌完成初始化並被 RTCPeerConnection 正式捕獲
+    await new Promise(r => setTimeout(r, 100));
+
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     publish(`ephemeral-classroom/${rid}/signal/${studentId}`, { from: myIdRef.current, signal: { type: 'offer', sdp: offer } });
