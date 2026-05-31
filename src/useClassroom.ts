@@ -36,7 +36,8 @@ export function useClassroom() {
   const studentDcRef = useRef<RTCDataChannel | null>(null);
   
   const iceBuffersRef = useRef<{ [peerId: string]: RTCIceCandidateInit[] }>({});
-  const chunkBuffersRef = useRef<{ [peerId: string]: { [msgId: string]: string[] } }>({});
+  const chunkBuffersRef = useRef<{ [peerId: string]: { [msgId: string]: { chunks: string[], received: number } } }>({});
+  const signalingLockRef = useRef<{ [peerId: string]: boolean }>({});
 
   const publish = (topic: string, message: any) => {
     if (mqttClientRef.current) {
@@ -44,49 +45,46 @@ export function useClassroom() {
     }
   };
 
-  // P2P Data Broadcast with Chunking support
+  // P2P Data Broadcast with Chunking support and BufferedAmount monitoring
   const CHUNK_SIZE = 16000; // ~16KB per chunk
+  const MAX_BUFFERED_AMOUNT = 1 * 1024 * 1024; // 1MB threshold
 
   const broadcastP2P = (data: any) => {
-    const msg = JSON.stringify(data);
-    if (msg.length > CHUNK_SIZE) {
-      const msgId = Math.random().toString(36).substring(2, 9);
-      const total = Math.ceil(msg.length / CHUNK_SIZE);
-      for (let i = 0; i < total; i++) {
-        const chunk = msg.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-        const chunkData = JSON.stringify({ type: 'chunk', id: msgId, index: i, total, data: chunk });
-        sendToAll(chunkData);
-      }
-    } else {
-      sendToAll(msg);
-    }
-  };
-
-  const sendToAll = (msg: string) => {
     if (myRole === 'teacher') {
       Object.values(teacherDcsRef.current).forEach(dc => {
-        if (dc.readyState === 'open') dc.send(msg);
+        if (dc.readyState === 'open') sendLargeData(dc, data);
       });
     } else if (studentDcRef.current?.readyState === 'open') {
-      studentDcRef.current.send(msg);
+      sendLargeData(studentDcRef.current, data);
     }
   };
 
   const sendToPeer = (peerId: string, data: any) => {
     const dc = myRole === 'teacher' ? teacherDcsRef.current[peerId] : studentDcRef.current;
     if (!dc || dc.readyState !== 'open') return;
+    sendLargeData(dc, data);
+  };
 
+  const sendLargeData = async (dc: RTCDataChannel, data: any) => {
     const msg = JSON.stringify(data);
-    if (msg.length > CHUNK_SIZE) {
-      const msgId = Math.random().toString(36).substring(2, 9);
-      const total = Math.ceil(msg.length / CHUNK_SIZE);
-      for (let i = 0; i < total; i++) {
-        const chunk = msg.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-        const chunkData = JSON.stringify({ type: 'chunk', id: msgId, index: i, total, data: chunk });
-        dc.send(chunkData);
+    if (msg.length <= CHUNK_SIZE) {
+      if (dc.readyState === 'open') dc.send(msg);
+      return;
+    }
+
+    const msgId = Math.random().toString(36).substring(2, 9);
+    const total = Math.ceil(msg.length / CHUNK_SIZE);
+
+    for (let i = 0; i < total; i++) {
+      // Monitor buffer to avoid overflow/drop
+      while (dc.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+        await new Promise(r => setTimeout(r, 50));
+        if (dc.readyState !== 'open') return;
       }
-    } else {
-      dc.send(msg);
+
+      const chunk = msg.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+      const chunkData = JSON.stringify({ type: 'chunk', id: msgId, index: i, total, data: chunk });
+      if (dc.readyState === 'open') dc.send(chunkData);
     }
   };
 
@@ -219,11 +217,19 @@ export function useClassroom() {
     let pc = myRole === 'teacher' ? teacherPcsRef.current[from] : (studentPcRef.current || createStudentPC(from));
     if (!pc) return;
 
+    // Signaling Lock to prevent parallel setLocal/RemoteDescription calls
+    if (signalingLockRef.current[from]) {
+      console.log("[WebRTC] Signaling locked for peer", from, ". Retrying...");
+      setTimeout(() => handleSignal(from, signal), 200);
+      return;
+    }
+
     try {
+      signalingLockRef.current[from] = true;
+
       if (signal.type === 'offer') {
         if (pc.signalingState !== 'stable') {
-          console.warn("[WebRTC] Received offer while not in stable state, attempting to reset.");
-          // P2P 衝突處理，通常簡單做法是關閉舊的
+          console.warn("[WebRTC] Received offer while not in stable state.");
         }
         await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
         const answer = await pc.createAnswer();
@@ -231,12 +237,12 @@ export function useClassroom() {
         publish(`ephemeral-classroom/${rid}/signal/${from}`, { from: myIdRef.current, signal: { type: 'answer', sdp: answer } });
         processIceBuffer(from, pc);
       } else if (signal.type === 'answer') {
-        if (pc.signalingState === 'stable') {
-          console.log("[WebRTC] Received answer but already stable. Skipping.");
-          return;
+        if (pc.signalingState !== 'have-local-offer') {
+          console.log("[WebRTC] Received answer but state is", pc.signalingState, ". Skipping.");
+        } else {
+          await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+          processIceBuffer(from, pc);
         }
-        await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-        processIceBuffer(from, pc);
       } else if (signal.type === 'candidate') {
         if (pc.remoteDescription) await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
         else {
@@ -244,7 +250,11 @@ export function useClassroom() {
           iceBuffersRef.current[from].push(signal.candidate);
         }
       }
-    } catch (err) { console.warn("WebRTC Signal Error", err); }
+    } catch (err) { 
+      console.warn("WebRTC Signal Error", err); 
+    } finally {
+      signalingLockRef.current[from] = false;
+    }
   };
 
   const createStudentPC = (teacherId: string) => {
@@ -292,13 +302,23 @@ export function useClassroom() {
       if (data.type === 'chunk') {
         const { id, index, total, data: chunkData } = data;
         if (!chunkBuffersRef.current[peerId]) chunkBuffersRef.current[peerId] = {};
-        if (!chunkBuffersRef.current[peerId][id]) chunkBuffersRef.current[peerId][id] = new Array(total).fill(null);
+        if (!chunkBuffersRef.current[peerId][id]) {
+          chunkBuffersRef.current[peerId][id] = { chunks: new Array(total).fill(null), received: 0 };
+        }
         
-        chunkBuffersRef.current[peerId][id][index] = chunkData;
+        const buffer = chunkBuffersRef.current[peerId][id];
+        if (buffer.chunks[index] === null) {
+          buffer.chunks[index] = chunkData;
+          buffer.received++;
+          
+          if (buffer.received % 50 === 0 || buffer.received === total) {
+            console.log(`[P2P] Receiving chunks: ${buffer.received}/${total}`);
+          }
+        }
 
         // Check if all chunks arrived
-        if (chunkBuffersRef.current[peerId][id].every(c => c !== null)) {
-          const fullMsg = chunkBuffersRef.current[peerId][id].join('');
+        if (buffer.received === total) {
+          const fullMsg = buffer.chunks.join('');
           delete chunkBuffersRef.current[peerId][id];
           data = JSON.parse(fullMsg);
         } else {
@@ -307,6 +327,7 @@ export function useClassroom() {
       }
 
       if (data.type === 'request_init_state' && myRole === 'teacher') {
+        console.log("[P2P] Teacher received request_init_state, sending full state...");
         // Teacher responds with full state (including backgrounds)
         setRoomState(current => {
           const syncData = {
