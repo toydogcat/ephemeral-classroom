@@ -588,45 +588,43 @@ export default function Whiteboard({
             transition: isPanning ? "none" : "transform 0.1s ease-out"
           }}
         >
-          {/* 老師端：維持原本的 Canvas 與底圖顯示 */}
-          {isHost && (
-            <>
-              {!currentBg && (
-                <div className="absolute inset-0 bg-grid-slate-800 pointer-events-none opacity-40" 
-                     style={{ backgroundImage: "radial-gradient(#334155 1px, transparent 1px)", backgroundSize: "20px 20px" }}
-                />
-              )}
-
-              {/* Dynamic Static lecture photo underneath standard canvas */}
-              {currentBg && (
-                <img 
-                  src={currentBg} 
-                  alt={`Page ${pageNum + 1} Lecture Background`}
-                  referrerPolicy="no-referrer"
-                  className="absolute inset-0 w-full h-full object-contain pointer-events-none bg-slate-900 z-0"
-                />
-              )}
-
-              {/* Overlaid Drawing canvas */}
-              <canvas
-                id="classroom-interactive-canvas"
-                ref={canvasRef}
-                width={LOGICAL_WIDTH}
-                height={LOGICAL_HEIGHT}
-                onMouseDown={startDraw}
-                onMouseMove={draw}
-                onMouseUp={stopDraw}
-                onMouseLeave={stopDraw}
-                className={`absolute inset-0 w-full h-full z-10 touch-none ${
-                  tool === "hand"
-                    ? isPanning ? "cursor-grabbing" : "cursor-grab"
-                    : "cursor-crosshair"
-                }`}
+          {/* 老師端與學生端：統一使用高效、清晰的 Canvas 與底圖顯示 */}
+          <>
+            {!currentBg && (
+              <div className="absolute inset-0 bg-grid-slate-800 pointer-events-none opacity-40" 
+                   style={{ backgroundImage: "radial-gradient(#334155 1px, transparent 1px)", backgroundSize: "20px 20px" }}
               />
-            </>
-          )}
+            )}
 
-          {/* 🟢 學生端新增修改：完全不跑 Canvas，只用一個滿版 Video 來同步看老師的畫面 */}
+            {/* Dynamic Static lecture photo underneath standard canvas */}
+            {currentBg && (
+              <img 
+                src={currentBg} 
+                alt={`Page ${pageNum + 1} Lecture Background`}
+                referrerPolicy="no-referrer"
+                className="absolute inset-0 w-full h-full object-contain pointer-events-none bg-slate-900 z-0"
+              />
+            )}
+
+            {/* Overlaid Drawing canvas */}
+            <canvas
+              id="classroom-interactive-canvas"
+              ref={canvasRef}
+              width={LOGICAL_WIDTH}
+              height={LOGICAL_HEIGHT}
+              onMouseDown={startDraw}
+              onMouseMove={draw}
+              onMouseUp={stopDraw}
+              onMouseLeave={stopDraw}
+              className={`absolute inset-0 w-full h-full z-10 touch-none ${
+                tool === "hand"
+                  ? isPanning ? "cursor-grabbing" : "cursor-grab"
+                  : "cursor-crosshair"
+              }`}
+            />
+          </>
+
+          {/* 學生端：隱藏的 Video 軌道播放器以保持 WebRTC 視訊軌與相容性 */}
           {!isHost && (
             <video
               id="classroom-student-video-whiteboard" // 🔵 對應前面 ontrack 綁定的 ID
@@ -634,15 +632,7 @@ export default function Whiteboard({
               playsInline
               muted // 🔥 關鍵：強制靜音白板視訊軌，解除瀏覽器的自動播放安全限制
               controls={false} // 關閉播放器原生控制列
-              className="w-full h-full object-contain bg-slate-900 pointer-events-none"
-              style={{ minWidth: '100%', minHeight: '100%' }}
-              onLoadedMetadata={(e) => {
-                // 🔥 關鍵：當媒體後設資料載入成功，強制呼叫 play() 避免影片卡在第一幀全黑
-                const videoEl = e.currentTarget;
-                videoEl.play().catch(err => {
-                  console.warn("[WebRTC Video] Autoplay blocked, waiting for user interaction:", err);
-                });
-              }}
+              className="hidden"
             />
           )}
         </div>

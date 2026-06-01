@@ -282,8 +282,8 @@ export function useClassroom() {
       signalingLockRef.current[from] = true;
 
       if (signal.type === 'offer') {
-        // 如果已經是 stable，代表連線已建立，忽略重複的 offer
-        if (pc.signalingState === 'stable') {
+        // 如果已經是 stable 且已有遠端描述，代表連線已建立，忽略重複的 offer
+        if (pc.signalingState === 'stable' && pc.remoteDescription) {
           console.log("[WebRTC] Already stable, ignoring redundant offer.");
           return;
         }
