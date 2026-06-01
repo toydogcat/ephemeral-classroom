@@ -200,6 +200,16 @@ export function useClassroom() {
     const pc = new RTCPeerConnection(STUN_SERVERS);
     teacherPcsRef.current[studentId] = pc;
 
+    pc.onconnectionstatechange = () => {
+      console.log(`[WebRTC Teacher] PeerConnection state with ${studentId}: ${pc.connectionState}`);
+    };
+    pc.oniceconnectionstatechange = () => {
+      console.log(`[WebRTC Teacher] ICE Connection state with ${studentId}: ${pc.iceConnectionState}`);
+    };
+    pc.onsignalingstatechange = () => {
+      console.log(`[WebRTC Teacher] Signaling state with ${studentId}: ${pc.signalingState}`);
+    };
+
     // 清理可能殘留的鎖
     signalingLockRef.current[studentId] = false;
 
@@ -320,7 +330,18 @@ export function useClassroom() {
     const pc = new RTCPeerConnection(STUN_SERVERS);
     studentPcRef.current = pc;
 
+    pc.onconnectionstatechange = () => {
+      console.log(`[WebRTC Student] PeerConnection state: ${pc.connectionState}`);
+    };
+    pc.oniceconnectionstatechange = () => {
+      console.log(`[WebRTC Student] ICE Connection state: ${pc.iceConnectionState}`);
+    };
+    pc.onsignalingstatechange = () => {
+      console.log(`[WebRTC Student] Signaling state: ${pc.signalingState}`);
+    };
+
     pc.ondatachannel = (event) => {
+      console.log(`[WebRTC Student] ondatachannel triggered! Channel name: ${event.channel.label}`);
       // 先賦值再執行 setup，確保 setup 內的 sendToPeer 找得到 dc
       studentDcRef.current = event.channel;
       setupDataChannel(event.channel, teacherId);
@@ -331,9 +352,7 @@ export function useClassroom() {
       myStreamRef.current.getTracks().forEach(track => pc.addTrack(track, myStreamRef.current!));
     }
 
-    // 🟢 關鍵修正：學生端主動加上一條視訊的 Transceiver，方向指定為 recvonly
-    // 這會強迫學生的 WebRTC 引擎在看到老師的 Offer 有視訊時，樂意接受它，而不是拒絕
-    pc.addTransceiver('video', { direction: 'recvonly' });
+
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
@@ -361,7 +380,8 @@ export function useClassroom() {
   };
 
   const setupDataChannel = (dc: RTCDataChannel, peerId: string) => {
-    dc.onopen = () => {
+    console.log(`[P2P] setupDataChannel called for ${peerId}. Initial readyState: ${dc.readyState}`);
+    const handleOpen = () => {
       console.log(`[P2P] DataChannel with ${peerId} is now OPEN`);
       if (myRole === 'student') {
         // 確保通道穩定後才發送
@@ -373,6 +393,14 @@ export function useClassroom() {
         }, 800);
       }
     };
+
+    dc.onopen = handleOpen;
+
+    // 🔥 關鍵修復：如果 DataChannel 在註冊時就已經是 open 狀態，手動觸發 handleOpen 避免漏接事件
+    if (dc.readyState === 'open') {
+      console.log(`[P2P] DataChannel was already OPEN upon setup for ${peerId}`);
+      handleOpen();
+    }
 
     dc.onclose = () => {
       console.warn(`[P2P] DataChannel with ${peerId} CLOSED`);
