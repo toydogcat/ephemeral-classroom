@@ -136,7 +136,9 @@ export function useClassroom() {
           `${baseTopic}/signal/${myIdRef.current}`,
           `${baseTopic}/chat`,
           `${baseTopic}/control/all`,
-          `${baseTopic}/control/${myIdRef.current}`
+          `${baseTopic}/control/${myIdRef.current}`,
+          `${baseTopic}/whiteboard_update`,
+          `${baseTopic}/draw`
         ], (err) => {
           if (!err) {
             // 延遲發送 join，確保訂閱已生效
@@ -169,7 +171,7 @@ export function useClassroom() {
           hostSocketId: data.hostSocketId,
           isAllMuted: data.isAllMuted,
           students: data.students || {},
-          // 保留本地已經由 P2P 同步過來的白板資料，防止被 MQTT 的空頁面洗掉
+          // 保留本地已經由 P2P 或 MQTT 同步過來的白板資料，防止被 MQTT 的空頁面洗掉
           whiteboardBackgrounds: prev.whiteboardBackgrounds.length > 1 || prev.whiteboardBackgrounds[0] !== '' 
             ? prev.whiteboardBackgrounds 
             : data.whiteboardBackgrounds || [''],
@@ -178,6 +180,31 @@ export function useClassroom() {
         }));
         setInRoom(true);
         setIsConnecting(false);
+      } else if (topic === `${baseTopic}/whiteboard_update` && role === 'student') {
+        console.log("[MQTT] Received whiteboard_update fallback:", data);
+        setRoomState(prev => {
+          // 只覆蓋非空的背景圖，防止本地已下載的高解析度背景被佔位用的空背景蓋掉
+          const nextBackgrounds = (data.whiteboardBackgrounds || ['']).map((bg: string, idx: number) => {
+            if (bg === "" && prev.whiteboardBackgrounds[idx]) {
+              return prev.whiteboardBackgrounds[idx];
+            }
+            return bg;
+          });
+          return {
+            ...prev,
+            whiteboardBackgrounds: nextBackgrounds,
+            whiteboardPageNum: data.whiteboardPageNum ?? 0,
+            whiteboardPaths: data.whiteboardPaths || []
+          };
+        });
+      } else if (topic === `${baseTopic}/draw` && role === 'student') {
+        setRoomState(prev => {
+          const batch = Array.isArray(data) ? data : [data];
+          return {
+            ...prev,
+            whiteboardPaths: [...prev.whiteboardPaths, ...batch].slice(-5000)
+          };
+        });
       } else if (topic === `${baseTopic}/chat`) {
         setRoomState(prev => ({ ...prev, chatHistory: [...prev.chatHistory, data].slice(-200) }));
       } else if (topic === `${baseTopic}/control/all` || topic === `${baseTopic}/control/${myIdRef.current}`) {
@@ -273,6 +300,33 @@ export function useClassroom() {
       // For lobby_sync via MQTT, we strip out heavy background images to stay under broker limits
       const syncState = { ...newState, whiteboardBackgrounds: [''] };
       publish(`ephemeral-classroom/${rid}/lobby_sync`, syncState);
+
+      // 備援同步：將目前的白板完整狀態以 MQTT 發送給剛加入的特定學生
+      const whiteboardState = {
+        type: 'whiteboard-sync',
+        payload: {
+          whiteboardBackgrounds: prev.whiteboardBackgrounds,
+          whiteboardPageNum: prev.whiteboardPageNum,
+          whiteboardPaths: prev.whiteboardPaths
+        }
+      };
+      
+      const stateStr = JSON.stringify(whiteboardState);
+      if (stateStr.length <= 250000) {
+        publish(`ephemeral-classroom/${rid}/control/${studentId}`, whiteboardState);
+      } else {
+        // 如果太大，則把大於 50KB 的 Base64 大圖片清空（讓 WebRTC P2P 的 DataChannel 完成後續大圖補發），但其餘頁碼、畫筆與小圖依然透過 MQTT 同步
+        const fallbackState = {
+          type: 'whiteboard-sync',
+          payload: {
+            whiteboardBackgrounds: prev.whiteboardBackgrounds.map(bg => bg.startsWith('data:') && bg.length > 50000 ? "" : bg),
+            whiteboardPageNum: prev.whiteboardPageNum,
+            whiteboardPaths: prev.whiteboardPaths
+          }
+        };
+        publish(`ephemeral-classroom/${rid}/control/${studentId}`, fallbackState);
+      }
+
       return newState;
     });
   };
@@ -504,15 +558,40 @@ export function useClassroom() {
       whiteboardPageNum: data.whiteboardPageNum,
       whiteboardPaths: data.whiteboardPaths
     };
-    // Sync via P2P
+    // Sync via P2P (DataChannel)
     broadcastP2P({ type: 'whiteboard_update', payload: whiteboardUpdate });
+    
+    // 備援同步：若當前是老師，則將更新同步發佈至 MQTT 備援通道，防止 WebRTC 被防火牆阻擋時學生端白板全空
+    if (myRole === 'teacher') {
+      const rid = roomIdRef.current;
+      const stateStr = JSON.stringify(whiteboardUpdate);
+      if (stateStr.length <= 250000) {
+        publish(`ephemeral-classroom/${rid}/whiteboard_update`, whiteboardUpdate);
+      } else {
+        // 大小超過 250KB 時，清除過大 Base64 的大圖片只做佔位，其餘元數據、頁碼、向量筆劃依然透過 MQTT 同步，大圖等 WebRTC 直連建立後補發
+        const fallbackUpdate = {
+          whiteboardBackgrounds: data.whiteboardBackgrounds.map((bg: string) => bg.startsWith('data:') && bg.length > 50000 ? "" : bg),
+          whiteboardPageNum: data.whiteboardPageNum,
+          whiteboardPaths: data.whiteboardPaths
+        };
+        publish(`ephemeral-classroom/${rid}/whiteboard_update`, fallbackUpdate);
+      }
+    }
+
     // Local Update
     setRoomState(prev => ({ ...prev, ...whiteboardUpdate }));
   };
 
   const broadcastDraw = (pathDeltaOrBatch: any) => {
-    // Sync via P2P
+    // Sync via P2P (DataChannel)
     broadcastP2P({ type: 'draw', payload: pathDeltaOrBatch });
+    
+    // 備援同步：若當前是老師，也將單筆繪圖操作發佈至 MQTT 備援通道
+    if (myRole === 'teacher') {
+      const rid = roomIdRef.current;
+      publish(`ephemeral-classroom/${rid}/draw`, pathDeltaOrBatch);
+    }
+
     // Update local teacher state so it persists during re-renders
     setRoomState(prev => {
       const batch = Array.isArray(pathDeltaOrBatch) ? pathDeltaOrBatch : [pathDeltaOrBatch];
@@ -562,6 +641,24 @@ export function useClassroom() {
   const handleControl = (data: any) => {
     if (data.type === 'mute-all') setRoomState(prev => ({ ...prev, isAllMuted: data.mute }));
     else if (data.type === 'speak-status') setRoomState(prev => ({ ...prev, students: { ...prev.students, [data.studentId]: { ...prev.students[data.studentId], canSpeak: data.canSpeak, isHandUp: data.isHandUp } } }));
+    else if (data.type === 'whiteboard-sync') {
+      console.log("[MQTT] Received whiteboard-sync fallback:", data.payload);
+      setRoomState(prev => {
+        // 合併背景：如果是佔位空字串且本地已有該頁背景，則保留本地背景，否則使用新背景
+        const nextBackgrounds = (data.payload.whiteboardBackgrounds || ['']).map((bg: string, idx: number) => {
+          if (bg === "" && prev.whiteboardBackgrounds[idx]) {
+            return prev.whiteboardBackgrounds[idx];
+          }
+          return bg;
+        });
+        return {
+          ...prev,
+          whiteboardBackgrounds: nextBackgrounds,
+          whiteboardPageNum: data.payload.whiteboardPageNum ?? 0,
+          whiteboardPaths: data.payload.whiteboardPaths || []
+        };
+      });
+    }
   };
 
   const handleTeacherControl = (data: any) => {
