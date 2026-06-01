@@ -51,7 +51,7 @@ export function useClassroom() {
 
   const broadcastP2P = (data: any) => {
     if (myRole === 'teacher') {
-      Object.values(teacherDcsRef.current).forEach(dc => {
+      (Object.values(teacherDcsRef.current) as RTCDataChannel[]).forEach(dc => {
         if (dc.readyState === 'open') sendLargeData(dc, data);
       });
     } else if (studentDcRef.current?.readyState === 'open') {
@@ -440,6 +440,22 @@ export function useClassroom() {
           const batch = Array.isArray(data.payload) ? data.payload : [data.payload];
           return { ...prev, whiteboardPaths: [...prev.whiteboardPaths, ...batch].slice(-5000) };
         });
+      } else if (data.type === 'chat_file') {
+        console.log("[P2P] Received chat_file message", data.payload);
+        const fileMsg = data.payload;
+        setRoomState(prev => ({
+          ...prev,
+          chatHistory: [...prev.chatHistory, fileMsg].slice(-200)
+        }));
+
+        // 老師端角色：協助星狀拓撲路由轉發，將學生的檔案轉發給其他所有學生
+        if (myRole === 'teacher') {
+          (Object.entries(teacherDcsRef.current) as [string, RTCDataChannel][]).forEach(([studentId, studentDc]) => {
+            if (studentId !== peerId && studentDc.readyState === 'open') {
+              sendLargeData(studentDc, { type: 'chat_file', payload: fileMsg });
+            }
+          });
+        }
       }
     };
   };
@@ -481,7 +497,23 @@ export function useClassroom() {
 
   const sendChatMessage = (content: string, type: 'text' | 'file' = 'text', fileData?: any) => {
     const msg: ChatMessage = { id: Math.random().toString(36).substring(2, 9), senderId: myIdRef.current, senderName: myNickname, role: myRole, content, timestamp: Date.now(), type, fileData };
-    publish(`ephemeral-classroom/${roomIdRef.current}/chat`, msg);
+    
+    if (type === 'file') {
+      // 檔案分享：不透過 MQTT，改以 WebRTC DataChannel (P2P) 直連分片傳送
+      setRoomState(prev => ({ ...prev, chatHistory: [...prev.chatHistory, msg].slice(-200) }));
+      
+      if (myRole === 'teacher') {
+        broadcastP2P({ type: 'chat_file', payload: msg });
+      } else {
+        if (studentDcRef.current?.readyState === 'open') {
+          sendLargeData(studentDcRef.current, { type: 'chat_file', payload: msg });
+        } else {
+          console.warn("[WebRTC] DataChannel not open, file send ignored");
+        }
+      }
+    } else {
+      publish(`ephemeral-classroom/${roomIdRef.current}/chat`, msg);
+    }
   };
 
   const toggleMuteAll = (mute: boolean) => {

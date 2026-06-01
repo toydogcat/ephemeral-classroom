@@ -42,7 +42,7 @@ const rooms: { [roomId: string]: Room } = {};
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = 3005;
   const httpServer = createServer(app);
 
   // Configure Socket.IO with dynamic payload sizing for file transfers and base64 sketches (max 20MB)
